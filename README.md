@@ -171,3 +171,8 @@ This is a prototype. It implements the core workflow primitive (script, subagent
 ## License
 
 MIT
+
+
+## Known issue (upstream)
+
+`session.abort()` cancelling an in-flight streaming request can leave an unconsumed SSE body, pinning the undici socket — a scripted `pi -p` run then never exits after the workflow settles (interactive TUI unaffected). Tracked upstream: https://github.com/earendil-works/pi/issues/11336
