@@ -138,7 +138,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           content: [
             {
               type: "text",
-              text: `Workflow ${entry.id} (${parsed.meta.name}) started in the background. Its completion is reported automatically and starts your next turn: if nothing else is left to do, end your turn now instead of polling; cancel with workflow_cancel.`,
+              text: `Workflow ${entry.id} (${parsed.meta.name}) started in the background. Its settlement is reported automatically and starts your next turn: if nothing else is left to do, end your turn now instead of polling. This is NOT a bash task — bash_output/bash_tasks/bash_kill will not find ${entry.id}; cancellation is workflow_cancel.`,
             },
           ],
           details: {

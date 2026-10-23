@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.1] — background text hardening (2026-10-24)
+
+### Fixed
+
+- Background start message now states explicitly that the workflow is NOT a bash task — `bash_output`/`bash_tasks`/`bash_kill` will not find the id; cancellation is `workflow_cancel`. A live probe showed the model reaching for `bash_output` with the wf id before self-correcting.
+
 ## [1.3.0] — background workflows (2026-10-24)
 
 ### Added

@@ -42,7 +42,7 @@ test("background: true returns immediately with a wf id; completion delivers set
   const started = await runTool(tool, { script: BG_SCRIPT, background: true });
   const text = started.content[0]?.text ?? "";
   assert.match(text, /started in the background/);
-  assert.match(text, /end your turn now instead of polling/);
+  assert.match(text, /NOT a bash task/);
   const id = (started.details as { id?: string }).id ?? "";
   assert.match(id, /^wf-\d+$/);
   assert.equal(registry.list().length, 1);
