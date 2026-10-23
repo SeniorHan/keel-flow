@@ -14,15 +14,14 @@ import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./work
 const workflowToolSchema = Type.Object({
   script: Type.String({
     description: [
-      "Required raw JavaScript workflow script, with no Markdown fences.",
-      "First statement: export const meta = { name: 'short_snake_case', description: 'non-empty description' }. meta.phases is optional documentation; live progress is driven by phase(title).",
-      "Use phase('Name'), agent(prompt, opts), parallel(arrayOfFunctions), pipeline(items, ...stages), log(message), args, and budget. The workflow must call agent() at least once.",
-      "parallel() requires functions, not promises: await parallel(items.map(item => () => agent(...))).",
+      "Raw JavaScript only, no Markdown fences.",
+      "First statement must be `export const meta = { name, description }` (non-empty); meta.phases is docs only; progress groups come from phase(title) calls.",
+      "Globals: phase, agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), log, args, cwd, process.cwd(), budget — call agent() at least once, never phases-only.",
+      "parallel takes thunks not promises: `parallel(items.map(item => () => agent(...)))`; results in input order.",
+      "Machine-readable output: opts.schema takes a JSON Schema (not TS/TypeBox); agent() returns the validated object.",
     ].join(" "),
   }),
-  args: Type.Optional(
-    Type.Any({ description: "Optional JSON value exposed to the workflow script as global `args`." }),
-  ),
+  args: Type.Optional(Type.Any({ description: "可选 JSON 值,作为脚本全局 `args`。" })),
 });
 
 export type WorkflowToolInput = {
@@ -47,27 +46,17 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
   return defineTool({
     name: "workflow",
     label: "Workflow",
-    description: [
-      "Execute a deterministic JavaScript workflow that orchestrates multiple subagents with agent(), parallel(), and pipeline().",
-      "script is required raw JavaScript. It must start with export const meta = { name, description } and must call agent() at least once; phases are optional metadata.",
-    ].join(" "),
-    promptSnippet:
-      "Run a deterministic JavaScript workflow. Required script header: export const meta = { name: 'short_snake_case', description: 'non-empty description' }. Use phase(title) at runtime to create progress groups.",
+    description: "运行确定性 JavaScript workflow,编排多个子代理(agent/parallel/pipeline);脚本规则见 script 参数描述。",
+    promptSnippet: "运行确定性 JS workflow(多子代理编排);规则见 script 参数描述。",
     promptGuidelines: [
-      "Use workflow only when the user explicitly asks for a workflow, workflows, fan-out, or multi-agent orchestration.",
-      "For workflow, always pass one raw JavaScript string in the required script parameter; do not include Markdown fences or prose around the script.",
-      "For workflow, the script's first statement must be `export const meta = { name: 'short_snake_case', description: 'non-empty human description' }`; meta.name and meta.description are required non-empty strings, and meta.phases is optional metadata for a stable upfront outline.",
-      "For workflow, write plain JavaScript after the meta export. Do not use TypeScript syntax, imports, require(), fs, Date.now(), Math.random(), or new Date().",
-      "For workflow, available globals are agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args, cwd, process.cwd(), and budget. Every workflow must call agent() at least once; do not use workflow only to declare phases or return a static object.",
-      "For workflow, call phase(title) when a new group of work starts. Phase names may be conditional or built in a loop; do not predeclare speculative phases just in case.",
-      "For workflow, prefer it for decomposable work: repository inspection, independent research/checks, multi-perspective review, or fan-out/fan-in synthesis. Do not use it for a single quick file read/edit or when ordinary tools are enough.",
-      "For workflow, parallel() takes functions, not promises: use `await parallel(items.map(item => () => agent('...', { label: '...' })))`, never `await parallel(items.map(item => agent(...)))`. Results are returned in input order.",
-      "For workflow, pipeline(items, ...stages) runs each item through stages sequentially, while different items may run concurrently. Each stage receives (previousValue, originalItem, index).",
-      "For workflow, every agent() call should include a unique short label option, 2-5 words, such as { label: 'repo inventory' } or { label: 'source modules' }; unique labels make live status and error reporting readable.",
-      "For workflow, failed agent(), parallel(), or pipeline() branches return null and log the failure unless the workflow is aborted. Check for nulls before synthesizing conclusions.",
-      "For workflow, include a final synthesis/assertion agent when combining multiple subagent results; return a compact JSON-serializable value with ok/verdict plus the important outputs.",
-      "For workflow, if agent() needs machine-readable output, pass a plain JSON Schema via opts.schema; agent() will return the validated object. Use JSON Schema syntax, not TypeScript or TypeBox constructors.",
-      "For workflow, do not assume the parent assistant has repository code context inside subagents; include enough task context and relevant paths in each agent prompt.",
+      "仅当用户明确要求 workflow/编排/fan-out/多代理时用;单一快速读写或普通工具够用则不用。步骤确定带门禁的执行计划最合适;探索式需转向的委派用交互式子代理工具。",
+      "meta 后纯 JS:禁 TS 语法、import、require()、fs、Date.now()、Math.random()。",
+      "新工作组分界处 phase(title);名可条件/循环生成,勿预声明投机 phase。",
+      "适用:可分解工作——盘点、独立检查、多视角评审、扇出合流。",
+      "pipeline 各 item 顺序过站、item 间并发;stage 收 (previousValue, originalItem, index)。",
+      "agent() 带唯一短 label(2-5 词),状态报错可读。",
+      "失败返 null 并记日志(中止除外),合成前查 null;多结果合并加最终 synthesis agent,返紧凑 JSON(ok/verdict+关键输出)。",
+      "子代理不继承父上下文:prompt 自包含,写清背景与路径。",
     ],
     parameters: workflowToolSchema,
     prepareArguments(args) {
