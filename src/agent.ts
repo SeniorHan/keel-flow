@@ -64,7 +64,12 @@ export function startBudgetWatch(
 ): { stop: () => void } {
   let stopped = false;
   const timer = setInterval(() => {
-    const spent = read();
+    let spent: UsageTotals;
+    try {
+      spent = read();
+    } catch {
+      return; // a throwing read() must not kill the interval tick
+    }
     if (spent.input + spent.output > budget) {
       stop();
       onOver(spent);
@@ -135,6 +140,12 @@ export class WorkflowAgent {
       }
 
       await session.prompt(this.buildPrompt(prompt, options as AgentRunOptions<any>, Boolean(options.schema)));
+      if (!budgetAbort && options.budgetTokens && options.budgetTokens > 0) {
+        // Sync reconciliation: a fast agent can finish before the next poll tick
+        // sees its usage — the check above would then race the poller and lose.
+        const spent = sumUsage(session.messages);
+        if (spent.input + spent.output > options.budgetTokens) budgetAbort = { spent };
+      }
       if (budgetAbort) {
         throw new Error(
           `Subagent exceeded budgetTokens (${budgetAbort.spent.input + budgetAbort.spent.output} > ${options.budgetTokens}); aborted`,

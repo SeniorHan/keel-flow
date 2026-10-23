@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1] — budget race fix (2026-10-23)
+
+### Fixed
+
+- Budget enforcement raced fast agents: `session.prompt` resolved before the 500ms poll tick ever saw the final assistant usage, so a single-call agent exceeding `budgetTokens` completed with a result instead of being rejected. `run()` now reconciles `sumUsage(session.messages)` synchronously after the prompt and throws on over-budget regardless of tick timing.
+- `startBudgetWatch` poll callback swallows `read()` throws instead of letting them kill the interval tick.
+
 ## [1.2.0] — per-agent supervision (2026-10-23)
 
 ### Added
