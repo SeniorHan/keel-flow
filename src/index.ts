@@ -1,5 +1,7 @@
 export type { AgentRunOptions, AgentRunResult, WorkflowAgentOptions } from "./agent.js";
 export { WorkflowAgent } from "./agent.js";
+export type { BackgroundSettlement, BackgroundWorkflow } from "./background.js";
+export { BackgroundRegistry, settlementText } from "./background.js";
 export type {
   WorkflowAgentSnapshot,
   WorkflowAgentStatus,
@@ -26,7 +28,10 @@ export type {
   WorkflowRunResult,
 } from "./workflow.js";
 export { parseWorkflowScript, runWorkflow } from "./workflow.js";
-export type { BackgroundSettlement, BackgroundWorkflow } from "./background.js";
-export { BackgroundRegistry, settlementText } from "./background.js";
-export type { WorkflowToolInput, WorkflowToolOptions } from "./workflow-tool.js";
+export type {
+  SyncRunHandle,
+  WorkflowToolExtras,
+  WorkflowToolInput,
+  WorkflowToolOptions,
+} from "./workflow-tool.js";
 export { createWorkflowCancelTool, createWorkflowTool } from "./workflow-tool.js";

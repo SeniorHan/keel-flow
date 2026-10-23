@@ -1,11 +1,8 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import {
-  BackgroundRegistry,
-  settlementText,
-  type BackgroundSettlement,
-} from "./background.js";
+import type { WorkflowAgent } from "./agent.js";
+import type { BackgroundRegistry, BackgroundSettlement, BackgroundWorkflow } from "./background.js";
 import {
   createToolUpdateWorkflowDisplay,
   createWorkflowSnapshot,
@@ -14,7 +11,6 @@ import {
   renderWorkflowText,
   type WorkflowSnapshot,
 } from "./display.js";
-import type { WorkflowAgent } from "./agent.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./workflow.js";
 
 const workflowToolSchema = Type.Object({
@@ -51,6 +47,18 @@ const workflowDisplayOptions = {
   showResultPreviews: false,
 } as const;
 
+/** One in-flight synchronous run that can still be adopted into the background registry. */
+export interface SyncRunHandle {
+  /** Adopt the run: register it in the registry and resolve the tool call with the detached text. Idempotent once detached/completed. */
+  detach(): BackgroundWorkflow | undefined;
+}
+
+/** Extra surface on the workflow tool for tap-to-background wiring. */
+export interface WorkflowToolExtras {
+  /** In-flight synchronous runs, present only between tool start and settle/detach. */
+  syncRuns: Set<SyncRunHandle>;
+}
+
 export interface WorkflowToolOptions {
   cwd?: string;
   concurrency?: number;
@@ -62,11 +70,15 @@ export interface WorkflowToolOptions {
   registry?: BackgroundRegistry;
 }
 
-export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
-  return defineTool({
+export function createWorkflowTool(
+  options: WorkflowToolOptions = {},
+): ToolDefinition<typeof workflowToolSchema, any> & WorkflowToolExtras {
+  const syncRuns = new Set<SyncRunHandle>();
+  const tool = defineTool({
     name: "workflow",
     label: "Workflow",
-    description: "运行确定性 JavaScript workflow,编排多个子代理(agent/parallel/pipeline)。同步默认;`background: true` 分离运行(立即返回 wf-N,完成自动唤醒下回合,长任务适用)。脚本规则见 script 参数描述。",
+    description:
+      "运行确定性 JavaScript workflow,编排多个子代理(agent/parallel/pipeline)。同步默认;`background: true` 分离运行(立即返回 wf-N,完成自动唤醒下回合,长任务适用)。脚本规则见 script 参数描述。",
     promptSnippet: "运行确定性 JS workflow(多子代理编排);规则见 script 参数描述。",
     promptGuidelines: [
       "仅当用户明确要求 workflow/编排/fan-out/多代理时用;单一快速读写或普通工具够用则不用。步骤确定带门禁的执行计划最合适;探索式需转向的委派用交互式子代理工具。",
@@ -107,33 +119,9 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             model: ctx.model,
           },
         });
-        const entry = options.registry.add(parsed.meta.name, run, controller);
-        void run
-          .then(
-            (result): BackgroundSettlement => ({
-              id: entry.id,
-              name: parsed.meta.name,
-              ok: true,
-              cancelled: false,
-              durationMs: result.durationMs,
-              agentCount: result.agentCount,
-              result: result.result,
-            }),
-            (error: unknown): BackgroundSettlement => ({
-              id: entry.id,
-              name: parsed.meta.name,
-              ok: false,
-              cancelled: controller.signal.aborted,
-              durationMs: Date.now() - entry.startedAt,
-              agentCount: 0,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          )
-          .then((settlement) => {
-            signal?.removeEventListener("abort", onAbort);
-            options.registry?.settle(entry.id);
-            options.onSettle?.(settlement);
-          });
+        const entry = adoptRun(options.registry, options.onSettle, parsed.meta.name, run, controller, () =>
+          signal?.removeEventListener("abort", onAbort),
+        );
         return {
           content: [
             {
@@ -159,50 +147,97 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
       };
 
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      if (signal?.aborted) controller.abort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+
+      let resolveDetached!: (entry: BackgroundWorkflow) => void;
+      const detached = new Promise<BackgroundWorkflow>((resolve) => {
+        resolveDetached = resolve;
+      });
+      const work = runWorkflow(script, {
+        cwd: options.cwd ?? ctx.cwd,
+        args: params.args,
+        signal: controller.signal,
+        concurrency: options.concurrency,
+        agent: options.agent,
+        session: {
+          modelRegistry: ctx.modelRegistry,
+          model: ctx.model,
+        },
+        onLog(message) {
+          snapshot.logs.push(message);
+          update();
+        },
+        onPhase(title) {
+          snapshot.currentPhase = title;
+          recordPhase(title);
+          update();
+        },
+        onAgentStart(event) {
+          if (signal?.aborted) throw new Error("Workflow was aborted");
+          recordPhase(event.phase);
+          snapshot.agents.push({
+            id: snapshot.agents.length + 1,
+            label: event.label,
+            phase: event.phase,
+            prompt: event.prompt,
+            status: "running",
+          });
+          update();
+        },
+        onAgentEnd(event) {
+          const agent = [...snapshot.agents]
+            .reverse()
+            .find((item) => item.label === event.label && item.status === "running");
+          if (agent) {
+            agent.status = event.result === null ? "error" : "done";
+            agent.resultPreview = preview(event.result);
+          }
+          update();
+        },
+      });
+      // If the run detaches, nobody awaits `work` anymore; keep a late rejection from
+      // surfacing as an unhandled rejection (the race has a handler only until detach).
+      void work.catch(() => {});
+      const handle: SyncRunHandle = {
+        detach() {
+          if (!syncRuns.delete(handle)) return undefined;
+          if (!options.registry) return undefined;
+          const entry = adoptRun(options.registry, options.onSettle, parsed.meta.name, work, controller, () =>
+            signal?.removeEventListener("abort", onAbort),
+          );
+          resolveDetached(entry);
+          return entry;
+        },
+      };
+      syncRuns.add(handle);
       let result: WorkflowRunResult;
       try {
-        result = await runWorkflow(script, {
-          cwd: options.cwd ?? ctx.cwd,
-          args: params.args,
-          signal,
-          concurrency: options.concurrency,
-          session: {
-            modelRegistry: ctx.modelRegistry,
-            model: ctx.model,
-          },
-          onLog(message) {
-            snapshot.logs.push(message);
-            update();
-          },
-          onPhase(title) {
-            snapshot.currentPhase = title;
-            recordPhase(title);
-            update();
-          },
-          onAgentStart(event) {
-            if (signal?.aborted) throw new Error("Workflow was aborted");
-            recordPhase(event.phase);
-            snapshot.agents.push({
-              id: snapshot.agents.length + 1,
-              label: event.label,
-              phase: event.phase,
-              prompt: event.prompt,
-              status: "running",
-            });
-            update();
-          },
-          onAgentEnd(event) {
-            const agent = [...snapshot.agents]
-              .reverse()
-              .find((item) => item.label === event.label && item.status === "running");
-            if (agent) {
-              agent.status = event.result === null ? "error" : "done";
-              agent.resultPreview = preview(event.result);
-            }
-            update();
-          },
-        });
+        const raced = await Promise.race([work, detached]);
+        syncRuns.delete(handle);
+        if ("controller" in raced) {
+          const entry = raced;
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Workflow ${entry.id} (${parsed.meta.name}) detached to the background because you sent a message: reply to the user first; settlement is reported automatically. This is NOT a bash task — bash_output/bash_tasks/bash_kill will not find ${entry.id}; cancellation is workflow_cancel.`,
+              },
+            ],
+            details: {
+              ...createWorkflowSnapshot(parsed.meta),
+              background: true,
+              id: entry.id,
+            },
+          };
+        }
+        result = raced;
+        signal?.removeEventListener("abort", onAbort);
       } catch (error) {
+        syncRuns.delete(handle);
+        signal?.removeEventListener("abort", onAbort);
         if (signal?.aborted || isAbortError(error)) {
           for (const agent of snapshot.agents) {
             if (agent.status === "running") {
@@ -256,7 +291,48 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       const text = result.content?.[0];
       return new Text(text?.type === "text" ? text.text : theme.fg("muted", "workflow"), 0, 0);
     },
-  });
+  }) as ToolDefinition<typeof workflowToolSchema, any> & WorkflowToolExtras;
+  tool.syncRuns = syncRuns;
+  return tool;
+}
+
+/** Shared adoption path: register a live run in the registry and deliver its settlement via onSettle. */
+function adoptRun(
+  registry: BackgroundRegistry,
+  onSettle: ((settlement: BackgroundSettlement) => void) | undefined,
+  name: string,
+  run: Promise<WorkflowRunResult>,
+  controller: AbortController,
+  cleanup?: () => void,
+): BackgroundWorkflow {
+  const entry = registry.add(name, run, controller);
+  void run
+    .then(
+      (result): BackgroundSettlement => ({
+        id: entry.id,
+        name,
+        ok: true,
+        cancelled: false,
+        durationMs: result.durationMs,
+        agentCount: result.agentCount,
+        result: result.result,
+      }),
+      (error: unknown): BackgroundSettlement => ({
+        id: entry.id,
+        name,
+        ok: false,
+        cancelled: controller.signal.aborted,
+        durationMs: Date.now() - entry.startedAt,
+        agentCount: 0,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
+    .then((settlement) => {
+      cleanup?.();
+      registry.settle(entry.id);
+      onSettle?.(settlement);
+    });
+  return entry;
 }
 
 function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
@@ -299,9 +375,7 @@ export function createWorkflowCancelTool(registry: BackgroundRegistry): ToolDefi
           content: [
             {
               type: "text",
-              text: running.length
-                ? `Running background workflows: ${running.join(", ")}`
-                : "No background workflows.",
+              text: running.length ? `Running background workflows: ${running.join(", ")}` : "No background workflows.",
             },
           ],
           details: { cancelled: false, running, id: undefined } as WorkflowCancelDetails,
@@ -316,7 +390,9 @@ export function createWorkflowCancelTool(registry: BackgroundRegistry): ToolDefi
         );
       }
       return {
-        content: [{ type: "text", text: `Workflow ${params.id} cancel requested; its settlement is reported automatically.` }],
+        content: [
+          { type: "text", text: `Workflow ${params.id} cancel requested; its settlement is reported automatically.` },
+        ],
         details: { cancelled: true, running: [], id: params.id } as WorkflowCancelDetails,
       };
     },

@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.0] — tap-to-background: user input detaches in-flight sync workflows (2026-10-24)
+
+### Added
+
+
+- Tap-to-background for synchronous workflow runs, mirroring keel-bash v0.6.0 (`abacc30`): a message queued during a sync run (`steer`) detaches every in-flight sync run — the run is adopted into `BackgroundRegistry` (shared `adoptRun` helper, same settlement path as `background: true`) and the tool call resolves immediately with the detached text, so the turn frees up to answer the user. Settlement is still reported automatically via `onSettle`.
+
+- `extensions/workflow.ts` eavesdrops via `pi.on("input")` (returns `{ action: "continue" }` — queueing pipeline untouched; `followUp` waits do not detach) and sends a hidden wake message per detached run. The message warns that this is NOT a bash task — `bash_output`/`bash_tasks`/`bash_kill` will not find `wf-N`; cancellation is `workflow_cancel`.
+
+- New surface: `createWorkflowTool` now returns the tool plus `syncRuns: Set<SyncRunHandle>` (in-flight sync runs only); `handle.detach()` is idempotent and a no-op with nothing in flight. Sync behavior is otherwise unchanged.
+
 ## [1.3.1] — background text hardening (2026-10-24)
 
 ### Fixed
