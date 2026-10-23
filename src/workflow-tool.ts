@@ -2,6 +2,11 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  BackgroundRegistry,
+  settlementText,
+  type BackgroundSettlement,
+} from "./background.js";
+import {
   createToolUpdateWorkflowDisplay,
   createWorkflowSnapshot,
   preview,
@@ -9,6 +14,7 @@ import {
   renderWorkflowText,
   type WorkflowSnapshot,
 } from "./display.js";
+import type { WorkflowAgent } from "./agent.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./workflow.js";
 
 const workflowToolSchema = Type.Object({
@@ -23,11 +29,18 @@ const workflowToolSchema = Type.Object({
     ].join(" "),
   }),
   args: Type.Optional(Type.Any({ description: "可选 JSON 值,作为脚本全局 `args`。" })),
+  background: Type.Optional(
+    Type.Boolean({
+      description:
+        "true = 分离运行:立即返回 wf-N,完成/失败/取消以事件自动唤醒下回合;长任务用它腾出回合,勿轮询。取消用 workflow_cancel。",
+    }),
+  ),
 });
 
 export type WorkflowToolInput = {
   script: string;
   args?: unknown;
+  background?: boolean;
 };
 
 const workflowDisplayOptions = {
@@ -41,13 +54,19 @@ const workflowDisplayOptions = {
 export interface WorkflowToolOptions {
   cwd?: string;
   concurrency?: number;
+  /** 测试注入口:替换 WorkflowAgent。 */
+  agent?: Pick<WorkflowAgent, "run">;
+  /** background:true 时必传:结算回调(扩展层接 pi.sendMessage 注入唤醒)。 */
+  onSettle?: (settlement: BackgroundSettlement) => void;
+  /** background:true 时必传:后台注册表(与 workflow_cancel 共享)。 */
+  registry?: BackgroundRegistry;
 }
 
 export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
   return defineTool({
     name: "workflow",
     label: "Workflow",
-    description: "运行确定性 JavaScript workflow,编排多个子代理(agent/parallel/pipeline);脚本规则见 script 参数描述。",
+    description: "运行确定性 JavaScript workflow,编排多个子代理(agent/parallel/pipeline)。同步默认;`background: true` 分离运行(立即返回 wf-N,完成自动唤醒下回合,长任务适用)。脚本规则见 script 参数描述。",
     promptSnippet: "运行确定性 JS workflow(多子代理编排);规则见 script 参数描述。",
     promptGuidelines: [
       "仅当用户明确要求 workflow/编排/fan-out/多代理时用;单一快速读写或普通工具够用则不用。步骤确定带门禁的执行计划最合适;探索式需转向的委派用交互式子代理工具。",
@@ -68,6 +87,67 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       const parsed = parseWorkflowScript(script);
       let snapshot: WorkflowSnapshot = createWorkflowSnapshot(parsed.meta);
       const display = createToolUpdateWorkflowDisplay(onUpdate, undefined, workflowDisplayOptions);
+
+      if (params.background === true) {
+        if (!options.registry || !options.onSettle) {
+          throw new Error("background workflows require a registry and an onSettle callback (extension wiring)");
+        }
+        const controller = new AbortController();
+        const onAbort = () => controller.abort();
+        if (signal?.aborted) controller.abort();
+        else signal?.addEventListener("abort", onAbort, { once: true });
+        const run = runWorkflow(script, {
+          cwd: options.cwd ?? ctx.cwd,
+          args: params.args,
+          signal: controller.signal,
+          concurrency: options.concurrency,
+          agent: options.agent,
+          session: {
+            modelRegistry: ctx.modelRegistry,
+            model: ctx.model,
+          },
+        });
+        const entry = options.registry.add(parsed.meta.name, run, controller);
+        void run
+          .then(
+            (result): BackgroundSettlement => ({
+              id: entry.id,
+              name: parsed.meta.name,
+              ok: true,
+              cancelled: false,
+              durationMs: result.durationMs,
+              agentCount: result.agentCount,
+              result: result.result,
+            }),
+            (error: unknown): BackgroundSettlement => ({
+              id: entry.id,
+              name: parsed.meta.name,
+              ok: false,
+              cancelled: controller.signal.aborted,
+              durationMs: Date.now() - entry.startedAt,
+              agentCount: 0,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          )
+          .then((settlement) => {
+            signal?.removeEventListener("abort", onAbort);
+            options.registry?.settle(entry.id);
+            options.onSettle?.(settlement);
+          });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Workflow ${entry.id} (${parsed.meta.name}) started in the background. Its completion is reported automatically and starts your next turn: if nothing else is left to do, end your turn now instead of polling; cancel with workflow_cancel.`,
+            },
+          ],
+          details: {
+            ...createWorkflowSnapshot(parsed.meta),
+            background: true,
+            id: entry.id,
+          },
+        };
+      }
 
       const update = () => {
         snapshot = recomputeWorkflowSnapshot(snapshot);
@@ -196,4 +276,49 @@ function normalizeWorkflowScript(script: string): string {
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /\babort(?:ed)?\b/i.test(error.message);
+}
+
+export interface WorkflowCancelDetails {
+  cancelled: boolean;
+  running: string[];
+  id?: string;
+}
+
+export function createWorkflowCancelTool(registry: BackgroundRegistry): ToolDefinition {
+  return defineTool({
+    name: "workflow_cancel",
+    label: "Workflow Cancel",
+    description: "取消后台 workflow(background: true 启动的);同步运行用 Esc;无参列出在跑的后台任务。",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "wf-N;省略=仅列出在跑的后台任务。" })),
+    }),
+    async execute(_toolCallId, params) {
+      const running = registry.list().map((entry) => `${entry.id} (${entry.name})`);
+      if (params.id === undefined) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: running.length
+                ? `Running background workflows: ${running.join(", ")}`
+                : "No background workflows.",
+            },
+          ],
+          details: { cancelled: false, running, id: undefined } as WorkflowCancelDetails,
+        };
+      }
+      const cancelled = registry.cancel(params.id);
+      if (!cancelled) {
+        throw new Error(
+          running.length
+            ? `Unknown workflow id ${params.id}; running: ${running.join(", ")}`
+            : `Unknown workflow id ${params.id}; no background workflows are running`,
+        );
+      }
+      return {
+        content: [{ type: "text", text: `Workflow ${params.id} cancel requested; its settlement is reported automatically.` }],
+        details: { cancelled: true, running: [], id: params.id } as WorkflowCancelDetails,
+      };
+    },
+  });
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0] — background workflows (2026-10-24)
+
+### Added
+
+- `background: true` on the `workflow` tool: the run detaches, the tool returns immediately with an id (`wf-N`), and settlement (completed/failed/cancelled) arrives as a hidden custom message (`keel-flow:update`, `display: false`) that starts the next turn — same injection pattern as keel-crew. Sync remains the default: gated fan-out-then-synthesize runs should stay synchronous.
+- `workflow_cancel` tool: `workflow_cancel {}` lists running background workflows; `workflow_cancel {id}` requests cooperative cancel (abort propagates through every in-flight agent session).
+- `BackgroundRegistry` (session-scoped, ids increment for the session's lifetime; settled entries removed) + `settlementText` formatting with a 4000-char result cap.
+- `extensions/workflow.ts` wires the registry, the cancel tool and `pi.sendMessage` delivery.
+
+### Notes
+
+- Rationale for keeping sync default: the dominant workflow use case is fan-out→synthesize where the caller needs the result to continue; backgrounding would add two turn round-trips per run. Background is for long runs where the main agent has other work to do meanwhile.
+- Per-agent supervision (v1.2.0) applies unchanged inside background runs; worst-case cost stays bounded.
+
 ## [1.2.1] — budget race fix (2026-10-23)
 
 ### Fixed
