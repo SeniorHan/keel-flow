@@ -27,11 +27,57 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   tools?: ToolDefinition[];
   instructions?: string;
   signal?: AbortSignal;
+  /** Report-only supervision timer (ms); the workflow layer resolves 0 → 60s default. Informational here. */
+  timeoutMs?: number;
+  /** Input-token budget; unset/0 disables. Over → the session is aborted and the run throws. */
+  budgetTokens?: number;
 }
 
 export type AgentRunResult<TSchemaDef extends TSchema | undefined> = TSchemaDef extends TSchema
   ? Static<TSchemaDef>
   : string;
+
+export interface UsageTotals {
+  input: number;
+  output: number;
+}
+
+/** Sum usage across assistant messages (pi AssistantMessage.usage). */
+export function sumUsage(messages: unknown[]): UsageTotals {
+  let input = 0;
+  let output = 0;
+  for (const message of messages) {
+    const candidate = message as { role?: string; usage?: { input?: number; output?: number } } | undefined;
+    if (candidate?.role !== "assistant" || !candidate.usage) continue;
+    input += Math.max(0, candidate.usage.input ?? 0);
+    output += Math.max(0, candidate.usage.output ?? 0);
+  }
+  return { input, output };
+}
+
+/** Poll `read()` until input+output exceeds `budget`, then call `onOver` once and stop polling. */
+export function startBudgetWatch(
+  read: () => UsageTotals,
+  budget: number,
+  onOver: (spent: UsageTotals) => void,
+  intervalMs = 500,
+): { stop: () => void } {
+  let stopped = false;
+  const timer = setInterval(() => {
+    const spent = read();
+    if (spent.input + spent.output > budget) {
+      stop();
+      onOver(spent);
+    }
+  }, intervalMs);
+  timer.unref?.();
+  function stop(): void {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+  }
+  return { stop };
+}
 
 export class WorkflowAgent {
   private readonly cwd: string;
@@ -68,6 +114,8 @@ export class WorkflowAgent {
     });
 
     let removeAbortListener: (() => void) | undefined;
+    let budgetWatch: { stop: () => void } | undefined;
+    let budgetAbort: { spent: UsageTotals } | undefined;
     try {
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
       if (options.signal) {
@@ -75,8 +123,23 @@ export class WorkflowAgent {
         options.signal.addEventListener("abort", onAbort, { once: true });
         removeAbortListener = () => options.signal?.removeEventListener("abort", onAbort);
       }
+      if (options.budgetTokens && options.budgetTokens > 0) {
+        budgetWatch = startBudgetWatch(
+          () => sumUsage(session.messages),
+          options.budgetTokens,
+          (spent) => {
+            budgetAbort = { spent };
+            void session.abort();
+          },
+        );
+      }
 
       await session.prompt(this.buildPrompt(prompt, options as AgentRunOptions<any>, Boolean(options.schema)));
+      if (budgetAbort) {
+        throw new Error(
+          `Subagent exceeded budgetTokens (${budgetAbort.spent.input + budgetAbort.spent.output} > ${options.budgetTokens}); aborted`,
+        );
+      }
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
 
       if (options.schema) {
@@ -88,6 +151,7 @@ export class WorkflowAgent {
 
       return this.lastAssistantText(session.messages) as AgentRunResult<TSchemaDef>;
     } finally {
+      budgetWatch?.stop();
       removeAbortListener?.();
       session.dispose();
     }

@@ -45,6 +45,10 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   model?: string;
   isolation?: "worktree";
   agentType?: string;
+  /** Report-only supervision timer in ms; 0 → 60s default. Logs an event; never stops the agent. */
+  timeoutMs?: number;
+  /** Input-token budget; 0 → 2,000,000 default. Over → the agent is aborted and returns null. */
+  budgetTokens?: number;
 }
 
 interface RuntimeState {
@@ -59,6 +63,10 @@ type AnyNode = Node & { [key: string]: any; start: number; end: number };
 
 const NONDETERMINISM_ERROR =
   "Workflow scripts must be deterministic: Date.now()/Math.random()/new Date() are unavailable";
+
+const AGENT_DEFAULT_TIMEOUT_MS = 60_000;
+const AGENT_MAX_TIMEOUT_MS = 3_600_000;
+const AGENT_DEFAULT_BUDGET_TOKENS = 2_000_000;
 
 export async function runWorkflow<T = unknown>(
   script: string,
@@ -103,12 +111,23 @@ export async function runWorkflow<T = unknown>(
     if (budget.total !== null && budget.remaining() <= 0) throw new Error("workflow token budget exhausted");
     const taskPrompt = requireString(prompt, "agent prompt");
     const normalizedOptions = normalizeAgentOptions(agentOptions);
+    const timeoutMs = resolveAgentTimeout(normalizedOptions.timeoutMs);
+    const budgetTokens = resolveAgentBudget(normalizedOptions.budgetTokens);
     const assignedPhase = normalizedOptions.phase ?? state.currentPhase;
     const requestedLabel = normalizedOptions.label?.trim();
     const run = limiter(async () => {
       state.agentCount++;
       const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
       options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt });
+      const timeoutTimer =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              log(
+                `agent ${label} timeout event after ${Math.round(timeoutMs / 1000)}s: still running (report-only; not stopped)`,
+              );
+            }, timeoutMs)
+          : undefined;
+      timeoutTimer?.unref?.();
       try {
         throwIfAborted();
         const result = await agentRunner.run(taskPrompt, {
@@ -116,6 +135,8 @@ export async function runWorkflow<T = unknown>(
           schema: normalizedOptions.schema,
           signal: options.signal,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
+          timeoutMs,
+          budgetTokens,
         } as any);
         throwIfAborted();
         state.spent += estimateTokens(result);
@@ -126,6 +147,8 @@ export async function runWorkflow<T = unknown>(
         log(`agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
         options.onAgentEnd?.({ label, phase: assignedPhase, result: null });
         return null;
+      } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
       }
     });
     pendingAgentRuns.add(run);
@@ -452,4 +475,22 @@ function buildAgentInstructions(phase: string | undefined, options: AgentOptions
 
 function estimateTokens(value: unknown): number {
   return Math.ceil(JSON.stringify(value ?? "").length / 4);
+}
+
+function resolveAgentTimeout(value: unknown): number {
+  if (value === undefined || value === 0) return AGENT_DEFAULT_TIMEOUT_MS;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > AGENT_MAX_TIMEOUT_MS) {
+    throw new TypeError(
+      `agent timeoutMs must be an integer between 0 and ${AGENT_MAX_TIMEOUT_MS}; 0 uses the 60s report-only default`,
+    );
+  }
+  return value;
+}
+
+function resolveAgentBudget(value: unknown): number {
+  if (value === undefined || value === 0) return AGENT_DEFAULT_BUDGET_TOKENS;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new TypeError("agent budgetTokens must be a non-negative integer; 0 uses the 2,000,000-token default");
+  }
+  return value;
 }

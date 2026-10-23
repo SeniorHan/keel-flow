@@ -18,6 +18,7 @@ const workflowToolSchema = Type.Object({
       "First statement must be `export const meta = { name, description }` (non-empty); meta.phases is docs only; progress groups come from phase(title) calls.",
       "Globals: phase, agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), log, args, cwd, process.cwd(), budget — call agent() at least once, never phases-only.",
       "parallel takes thunks not promises: `parallel(items.map(item => () => agent(...)))`; results in input order.",
+      "Per-agent supervision: opts.timeoutMs (0 = 60s report-only default; logs an event, never stops the agent) and opts.budgetTokens (0 = 2,000,000 default; over → agent aborted, call returns null).",
       "Machine-readable output: opts.schema takes a JSON Schema (not TS/TypeBox); agent() returns the validated object.",
     ].join(" "),
   }),
