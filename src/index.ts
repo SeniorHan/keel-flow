@@ -1,7 +1,7 @@
 export type { AgentRunOptions, AgentRunResult, WorkflowAgentOptions } from "./agent.js";
 export { WorkflowAgent } from "./agent.js";
 export type { BackgroundSettlement, BackgroundWorkflow } from "./background.js";
-export { BackgroundRegistry, settlementText } from "./background.js";
+export { BackgroundRegistry, settlementNotifyLine, settlementText } from "./background.js";
 export type {
   WorkflowAgentSnapshot,
   WorkflowAgentStatus,

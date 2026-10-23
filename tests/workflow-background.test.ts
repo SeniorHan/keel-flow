@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BackgroundRegistry } from "../src/background.js";
+import { BackgroundRegistry, type BackgroundSettlement, settlementNotifyLine } from "../src/background.js";
 import {
   createWorkflowCancelTool,
   createWorkflowTool,
@@ -165,4 +165,104 @@ test("workflow tool description advertises background and sync default", () => {
   const backgroundDesc = (tool.parameters as unknown as { properties: { background: { description?: string } } })
     .properties.background.description;
   assert.match(backgroundDesc ?? "", /wf-N/);
+});
+
+test("settlementNotifyLine covers completed, failed and cancelled branches", () => {
+  assert.equal(
+    settlementNotifyLine({ id: "wf-1", name: "fan_out", ok: true, cancelled: false, durationMs: 1234, agentCount: 3 }),
+    "wf-1 (fan_out) ✓ completed · 3 agents · 1.2s",
+  );
+  assert.equal(
+    settlementNotifyLine({
+      id: "wf-2",
+      name: "probe",
+      ok: false,
+      cancelled: false,
+      durationMs: 500,
+      agentCount: 0,
+      error: "boom",
+    }),
+    "wf-2 (probe) ✗ failed: boom",
+  );
+  assert.equal(
+    settlementNotifyLine({ id: "wf-3", name: "probe", ok: false, cancelled: true, durationMs: 2500, agentCount: 0 }),
+    "wf-3 (probe) ⊘ cancelled after 2.5s",
+  );
+});
+
+test("background runs stream progress via onUpdate and notify the TUI on settle", async () => {
+  const registry = new BackgroundRegistry();
+  const settlements: BackgroundSettlement[] = [];
+  const uiRef: { current?: { notify: (message: string) => void } } = { current: undefined };
+  const notified: string[] = [];
+  const texts: string[] = [];
+  const agent = blockingAgent();
+  // Mirror extensions/workflow.ts: the tool stores ctx.ui in uiRef; onSettle notifies.
+  const tool = createWorkflowTool({
+    agent,
+    registry,
+    onSettle: (n) => {
+      settlements.push(n);
+      uiRef.current?.notify(settlementNotifyLine(n));
+    },
+    uiRef,
+  });
+  const ctx = { ...TOOL_CTX, hasUI: false, ui: { notify: (message: string) => notified.push(message) } } as never;
+
+  const started = await tool.execute(
+    "call-bg",
+    { script: BG_SCRIPT, background: true },
+    undefined,
+    (result: { content: Array<{ type: string; text: string }> }) => texts.push(result.content[0]?.text ?? ""),
+    ctx,
+  );
+  const id = (started.details as { id?: string }).id ?? "";
+  assert.match(id, /^wf-\d+$/);
+  assert.ok(texts.length >= 1, "background start streams an update");
+
+  agent.release();
+  for (let i = 0; i < 4; i += 1) await new Promise((r) => setImmediate(r));
+
+  assert.ok(
+    texts.some((t) => t.includes("●")),
+    "running agent is streamed while the run is in flight",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("✓ agent 1")),
+    "agent completion is streamed",
+  );
+  assert.ok(
+    texts.some((t) => t.startsWith("Workflow completed")),
+    "settle marks the background display complete",
+  );
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0].id, id);
+  assert.equal(notified.length, 1, "settlement notifies the TUI exactly once");
+  assert.equal(notified[0], settlementNotifyLine(settlements[0]));
+});
+
+test("settle after detach runs display.complete: onUpdate gets a completed render", async () => {
+  const registry = new BackgroundRegistry();
+  const texts: string[] = [];
+  const agent = blockingAgent();
+  const tool = createWorkflowTool({ agent, registry, onSettle: () => {} });
+
+  const pending = tool.execute(
+    "call-detach",
+    { script: BG_SCRIPT },
+    undefined,
+    (result: { content: Array<{ type: string; text: string }> }) => texts.push(result.content[0]?.text ?? ""),
+    TOOL_CTX,
+  );
+  const handle = (tool as WorkflowToolExtras).syncRuns.values().next().value as SyncRunHandle | undefined;
+  assert.ok(handle);
+  handle.detach();
+  await pending;
+
+  agent.release();
+  for (let i = 0; i < 4; i += 1) await new Promise((r) => setImmediate(r));
+  assert.ok(
+    texts.some((t) => t.startsWith("Workflow completed")),
+    "detached settle marks the display complete",
+  );
 });

@@ -33,6 +33,15 @@ export function settlementText(n: BackgroundSettlement): string {
   return `Background workflow ${n.id} (${n.name}) completed with ${n.agentCount} agent(s) in ${seconds} s.\n\nResult:\n${json}`;
 }
 
+/** One-line settlement notification for the TUI (pi notify). */
+export function settlementNotifyLine(n: BackgroundSettlement): string {
+  const seconds = (n.durationMs / 1000).toFixed(1);
+  if (n.cancelled) return `${n.id} (${n.name}) ⊘ cancelled after ${seconds}s`;
+  if (!n.ok) return `${n.id} (${n.name}) ✗ failed: ${n.error ?? "unknown error"}`;
+  const agents = `${n.agentCount} agent${n.agentCount === 1 ? "" : "s"}`;
+  return `${n.id} (${n.name}) ✓ completed · ${agents} · ${seconds}s`;
+}
+
 /**
  * Session-scoped registry of detached workflows (background: true).
  * Entries are removed on settle; ids keep incrementing for the session's lifetime.

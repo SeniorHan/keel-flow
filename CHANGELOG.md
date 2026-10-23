@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.0] — TUI wiring: running status line, settlement finish + notify, /workflow command (2026-10-24)
+
+### Added
+
+- Running status line for both sync and background runs: the tool now passes the real `ctx` to `createToolUpdateWorkflowDisplay` (`showStatus: true, showWidget: false` — footer status only, no widget), the sync progress callbacks were extracted into a shared `makeCallbacks` helper and are now also attached to `background: true` runs (previously zero progress), and snapshots carry `startedAt` so `renderWorkflowLines` appends `· Ns` to the header while running.
+- Settlement finish: `adoptRun` takes an `onDone` callback (runs after `cleanup`, before `registry.settle`); both adoption sites recompute the snapshot and call `display.complete` so detached/background runs visibly finish instead of leaving a stale status line.
+- Settlement TUI notify: extensions pass a `uiRef`; `execute` stores `ctx.ui` in it and `onSettle` calls `notify(settlementNotifyLine(settlement))` — one-liners like `wf-1 (name) ✓ completed · 3 agents · 1.2s` / `✗ failed: …` / `⊘ cancelled after …s`, fixing invisible background settlements.
+- `/workflow` slash command: no args lists running background workflows (`wf-N (name) · Ns elapsed`), `/workflow cancel wf-N` requests cancel, anything else prints usage.
+
 ## [1.4.0] — tap-to-background: user input detaches in-flight sync workflows (2026-10-24)
 
 ### Added

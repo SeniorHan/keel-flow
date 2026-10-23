@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createWidgetWorkflowDisplay,
   createWorkflowSnapshot,
   recomputeWorkflowSnapshot,
   renderWorkflowLines,
@@ -115,4 +116,49 @@ test("renderWorkflowLines separates logs from progress", () => {
   const logIndex = lines.findIndex((line) => line.includes("log: finished scan"));
   assert.ok(logIndex > 0);
   assert.equal(lines[logIndex - 1], "");
+});
+
+function widgetCtx() {
+  const calls: { status?: string | undefined; widget?: string[] | undefined } = {};
+  const ctx = {
+    hasUI: true,
+    ui: {
+      setStatus: (_key: string, text: string | undefined) => {
+        calls.status = text;
+      },
+      setWidget: (_key: string, content: string[] | undefined) => {
+        calls.widget = content;
+      },
+    },
+  };
+  return { calls, ctx: ctx as unknown as Parameters<typeof createWidgetWorkflowDisplay>[0] };
+}
+
+test("renderWorkflowLines appends elapsed to the header only while running", () => {
+  const running = renderWorkflowLines(snapshot({ startedAt: Date.now() - 5200 }));
+  assert.match(running[0], / · 5s$/);
+
+  const finished = renderWorkflowLines(snapshot({ startedAt: Date.now() - 5200, durationMs: 5200 }));
+  assert.doesNotMatch(finished[0], / · \d+s/);
+
+  const neverStarted = renderWorkflowLines(snapshot());
+  assert.doesNotMatch(neverStarted[0], / · \d+s/);
+});
+
+test("widget display shows the completed status line and honors showWidget:false", () => {
+  const { calls, ctx } = widgetCtx();
+  const done = snapshot({ agents: [agent()] });
+
+  const display = createWidgetWorkflowDisplay(ctx, { key: "wf", showStatus: true, showWidget: false });
+  display.complete(done);
+  assert.equal(calls.status, "workflow ✓ demo_workflow: 1/1");
+  assert.equal(calls.widget, undefined, "showWidget:false skips setWidget");
+});
+
+test("widget display default shows the widget with the running status line", () => {
+  const { calls, ctx } = widgetCtx();
+  const display = createWidgetWorkflowDisplay(ctx, { key: "wf", showStatus: true });
+  display.update(snapshot({ agents: [agent({ status: "running" })], startedAt: Date.now() - 5200 }));
+  assert.match(calls.status ?? "", /workflow demo_workflow: 1 running, 0\/1 done/);
+  assert.ok(calls.widget?.[0].includes(" · 5s"));
 });

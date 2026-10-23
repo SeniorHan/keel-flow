@@ -1,3 +1,4 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -11,7 +12,7 @@ import {
   renderWorkflowText,
   type WorkflowSnapshot,
 } from "./display.js";
-import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./workflow.js";
+import { parseWorkflowScript, runWorkflow, type WorkflowRunOptions, type WorkflowRunResult } from "./workflow.js";
 
 const workflowToolSchema = Type.Object({
   script: Type.String({
@@ -44,7 +45,8 @@ const workflowDisplayOptions = {
   streamToolUpdates: true,
   maxAgents: 4,
   maxLogs: 1,
-  showResultPreviews: false,
+  showStatus: true,
+  showWidget: false,
 } as const;
 
 /** One in-flight synchronous run that can still be adopted into the background registry. */
@@ -68,6 +70,8 @@ export interface WorkflowToolOptions {
   onSettle?: (settlement: BackgroundSettlement) => void;
   /** background:true 时必传:后台注册表(与 workflow_cancel 共享)。 */
   registry?: BackgroundRegistry;
+  /** 扩展层传入的 ui 引用:execute 时写入 ctx.ui,结算由扩展层 notify TUI。 */
+  uiRef?: { current?: Pick<ExtensionContext["ui"], "notify"> };
 }
 
 export function createWorkflowTool(
@@ -98,7 +102,16 @@ export function createWorkflowTool(
       const script = normalizeWorkflowScript(params.script);
       const parsed = parseWorkflowScript(script);
       let snapshot: WorkflowSnapshot = createWorkflowSnapshot(parsed.meta);
-      const display = createToolUpdateWorkflowDisplay(onUpdate, undefined, workflowDisplayOptions);
+      snapshot.startedAt = Date.now();
+      if (options.uiRef) options.uiRef.current = ctx.ui;
+      const display = createToolUpdateWorkflowDisplay(onUpdate, ctx, workflowDisplayOptions);
+
+      // In-place recompute: keep the snapshot object identity stable so the shared
+      // makeCallbacks closures stay live after a detach hands the run to the background.
+      const update = () => {
+        Object.assign(snapshot, recomputeWorkflowSnapshot(snapshot));
+        display.update(snapshot);
+      };
 
       if (params.background === true) {
         if (!options.registry || !options.onSettle) {
@@ -118,9 +131,19 @@ export function createWorkflowTool(
             modelRegistry: ctx.modelRegistry,
             model: ctx.model,
           },
+          ...makeCallbacks(snapshot, update),
         });
-        const entry = adoptRun(options.registry, options.onSettle, parsed.meta.name, run, controller, () =>
-          signal?.removeEventListener("abort", onAbort),
+        const entry = adoptRun(
+          options.registry,
+          options.onSettle,
+          parsed.meta.name,
+          run,
+          controller,
+          () => signal?.removeEventListener("abort", onAbort),
+          () => {
+            snapshot = recomputeWorkflowSnapshot(snapshot);
+            display.complete(snapshot);
+          },
         );
         return {
           content: [
@@ -136,16 +159,6 @@ export function createWorkflowTool(
           },
         };
       }
-
-      const update = () => {
-        snapshot = recomputeWorkflowSnapshot(snapshot);
-        display.update(snapshot);
-      };
-
-      const recordPhase = (title: string | undefined) => {
-        if (!title) return;
-        if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
-      };
 
       const controller = new AbortController();
       const onAbort = () => controller.abort();
@@ -166,37 +179,9 @@ export function createWorkflowTool(
           modelRegistry: ctx.modelRegistry,
           model: ctx.model,
         },
-        onLog(message) {
-          snapshot.logs.push(message);
-          update();
-        },
-        onPhase(title) {
-          snapshot.currentPhase = title;
-          recordPhase(title);
-          update();
-        },
-        onAgentStart(event) {
+        ...makeCallbacks(snapshot, update, () => {
           if (signal?.aborted) throw new Error("Workflow was aborted");
-          recordPhase(event.phase);
-          snapshot.agents.push({
-            id: snapshot.agents.length + 1,
-            label: event.label,
-            phase: event.phase,
-            prompt: event.prompt,
-            status: "running",
-          });
-          update();
-        },
-        onAgentEnd(event) {
-          const agent = [...snapshot.agents]
-            .reverse()
-            .find((item) => item.label === event.label && item.status === "running");
-          if (agent) {
-            agent.status = event.result === null ? "error" : "done";
-            agent.resultPreview = preview(event.result);
-          }
-          update();
-        },
+        }),
       });
       // If the run detaches, nobody awaits `work` anymore; keep a late rejection from
       // surfacing as an unhandled rejection (the race has a handler only until detach).
@@ -205,8 +190,17 @@ export function createWorkflowTool(
         detach() {
           if (!syncRuns.delete(handle)) return undefined;
           if (!options.registry) return undefined;
-          const entry = adoptRun(options.registry, options.onSettle, parsed.meta.name, work, controller, () =>
-            signal?.removeEventListener("abort", onAbort),
+          const entry = adoptRun(
+            options.registry,
+            options.onSettle,
+            parsed.meta.name,
+            work,
+            controller,
+            () => signal?.removeEventListener("abort", onAbort),
+            () => {
+              snapshot = recomputeWorkflowSnapshot(snapshot);
+              display.complete(snapshot);
+            },
           );
           resolveDetached(entry);
           return entry;
@@ -296,6 +290,51 @@ export function createWorkflowTool(
   return tool;
 }
 
+/** Snapshot-mutating progress callbacks shared by the sync and background run paths. */
+function makeCallbacks(
+  snapshot: WorkflowSnapshot,
+  update: () => void,
+  beforeAgentStart?: () => void,
+): Pick<WorkflowRunOptions, "onLog" | "onPhase" | "onAgentStart" | "onAgentEnd"> {
+  const recordPhase = (title: string | undefined) => {
+    if (!title) return;
+    if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
+  };
+  return {
+    onLog(message) {
+      snapshot.logs.push(message);
+      update();
+    },
+    onPhase(title) {
+      snapshot.currentPhase = title;
+      recordPhase(title);
+      update();
+    },
+    onAgentStart(event) {
+      beforeAgentStart?.();
+      recordPhase(event.phase);
+      snapshot.agents.push({
+        id: snapshot.agents.length + 1,
+        label: event.label,
+        phase: event.phase,
+        prompt: event.prompt,
+        status: "running",
+      });
+      update();
+    },
+    onAgentEnd(event) {
+      const agent = [...snapshot.agents]
+        .reverse()
+        .find((item) => item.label === event.label && item.status === "running");
+      if (agent) {
+        agent.status = event.result === null ? "error" : "done";
+        agent.resultPreview = preview(event.result);
+      }
+      update();
+    },
+  };
+}
+
 /** Shared adoption path: register a live run in the registry and deliver its settlement via onSettle. */
 function adoptRun(
   registry: BackgroundRegistry,
@@ -304,6 +343,7 @@ function adoptRun(
   run: Promise<WorkflowRunResult>,
   controller: AbortController,
   cleanup?: () => void,
+  onDone?: () => void,
 ): BackgroundWorkflow {
   const entry = registry.add(name, run, controller);
   void run
@@ -329,6 +369,7 @@ function adoptRun(
     )
     .then((settlement) => {
       cleanup?.();
+      onDone?.();
       registry.settle(entry.id);
       onSettle?.(settlement);
     });

@@ -1,9 +1,17 @@
-import type { ExtensionAPI, InputEventResult } from "@earendil-works/pi-coding-agent";
-import { BackgroundRegistry, type BackgroundSettlement, settlementText } from "../src/background.js";
+import type { ExtensionAPI, ExtensionContext, InputEventResult } from "@earendil-works/pi-coding-agent";
+import {
+  BackgroundRegistry,
+  type BackgroundSettlement,
+  settlementNotifyLine,
+  settlementText,
+} from "../src/background.js";
 import { createWorkflowCancelTool, createWorkflowTool, type WorkflowToolExtras } from "../src/index.js";
 
 export default function workflowExtension(pi: ExtensionAPI): void {
   const registry = new BackgroundRegistry();
+  // Set once the workflow tool executes; lets onSettle notify the TUI from the
+  // extension scope (settlements fire outside any tool call).
+  const uiRef: { current?: Pick<ExtensionContext["ui"], "notify"> } = { current: undefined };
 
   const onSettle = (settlement: BackgroundSettlement): void => {
     // Same shape as keel-crew's settlement notifications: hidden custom message
@@ -17,11 +25,40 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       },
       { triggerTurn: true },
     );
+    uiRef.current?.notify(settlementNotifyLine(settlement));
   };
 
-  const tool = createWorkflowTool({ registry, onSettle });
+  const tool = createWorkflowTool({ registry, onSettle, uiRef });
   pi.registerTool(tool);
   pi.registerTool(createWorkflowCancelTool(registry));
+  pi.registerCommand("workflow", {
+    description: "列出/取消后台 workflow",
+    async handler(args, ctx) {
+      const cancelMatch = args.match(/^cancel\s+(wf-\d+)$/);
+      if (cancelMatch) {
+        if (registry.cancel(cancelMatch[1])) {
+          ctx.ui.notify(`${cancelMatch[1]} cancel requested; settlement is reported automatically`);
+        } else {
+          ctx.ui.notify(`Unknown workflow id ${cancelMatch[1]}; no background workflow is running`, "warning");
+        }
+        return;
+      }
+      if (args.trim()) {
+        ctx.ui.notify("Usage: /workflow (list running) · /workflow cancel wf-N (request cancel)", "warning");
+        return;
+      }
+      const running = registry.list();
+      if (running.length === 0) {
+        ctx.ui.notify("No background workflows.");
+        return;
+      }
+      const lines = running.map(
+        (entry) =>
+          `${entry.id} (${entry.name}) · ${Math.max(0, Math.round((Date.now() - entry.startedAt) / 1000))}s elapsed`,
+      );
+      ctx.ui.notify(lines.join("\n"));
+    },
+  });
   // Tap-to-background: a message queued while a synchronous workflow runs detaches
   // every in-flight sync run so the turn frees up for the user. Only eavesdrop —
   // "continue" keeps the queueing pipeline untouched; the detached tool result and

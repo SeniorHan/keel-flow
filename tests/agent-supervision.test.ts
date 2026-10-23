@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sumUsage, startBudgetWatch } from "../src/agent.js";
+import { startBudgetWatch, sumUsage } from "../src/agent.js";
 import { runWorkflow } from "../src/workflow.js";
 
 const SUPERVISION_SCRIPT = (opts: string) => `
@@ -93,7 +93,12 @@ test("sumUsage totals assistant usage only", () => {
 test("startBudgetWatch fires once over budget and stops", async () => {
   let usage = { input: 0, output: 0 };
   const overs: number[] = [];
-  const watch = startBudgetWatch(() => usage, 100, (spent) => overs.push(spent.input + spent.output), 10);
+  const watch = startBudgetWatch(
+    () => usage,
+    100,
+    (spent) => overs.push(spent.input + spent.output),
+    10,
+  );
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(overs.length, 0);
   usage = { input: 150, output: 0 };

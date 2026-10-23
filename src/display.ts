@@ -25,6 +25,8 @@ export interface WorkflowSnapshot {
   doneCount: number;
   errorCount: number;
   durationMs?: number;
+  /** Wall-clock start of the run; drives the running elapsed in the header line. */
+  startedAt?: number;
   result?: unknown;
 }
 
@@ -40,6 +42,8 @@ export interface WorkflowDisplayOptions {
   maxAgents?: number;
   maxLogs?: number;
   showStatus?: boolean;
+  /** Default true; false keeps the footer status line but skips setWidget. */
+  showWidget?: boolean;
   showResultPreviews?: boolean;
 }
 
@@ -71,11 +75,12 @@ export function createWidgetWorkflowDisplay(
   const key = options.key ?? "workflow";
   const placement = options.placement ?? "belowEditor";
   const showStatus = options.showStatus ?? false;
+  const showWidget = options.showWidget ?? true;
 
   const render = (snapshot: WorkflowSnapshot, completed = false) => {
     if (!ctx.hasUI) return;
     if (showStatus) ctx.ui.setStatus(key, statusLine(snapshot, completed));
-    ctx.ui.setWidget(key, renderWorkflowLines(snapshot, options), { placement });
+    if (showWidget) ctx.ui.setWidget(key, renderWorkflowLines(snapshot, options), { placement });
   };
 
   return {
@@ -88,7 +93,7 @@ export function createWidgetWorkflowDisplay(
     clear() {
       if (!ctx.hasUI) return;
       if (showStatus) ctx.ui.setStatus(key, undefined);
-      ctx.ui.setWidget(key, undefined);
+      if (showWidget) ctx.ui.setWidget(key, undefined);
     },
   };
 }
@@ -135,7 +140,11 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
       : snapshot.runningCount > 0
         ? `, ${snapshot.runningCount} running`
         : "";
-  const lines = [`◆ Workflow: ${snapshot.name} (${snapshot.doneCount}/${snapshot.agentCount} done${state})`];
+  const elapsed =
+    snapshot.startedAt !== undefined && snapshot.durationMs === undefined
+      ? ` · ${Math.max(0, Math.round((Date.now() - snapshot.startedAt) / 1000))}s`
+      : "";
+  const lines = [`◆ Workflow: ${snapshot.name} (${snapshot.doneCount}/${snapshot.agentCount} done${state})${elapsed}`];
 
   const agentPhaseNames = snapshot.agents
     .map((agent) => agent.phase)
