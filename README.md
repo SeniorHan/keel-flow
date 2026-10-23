@@ -175,4 +175,4 @@ MIT
 
 ## Known issue (upstream)
 
-`session.abort()` cancelling an in-flight streaming request can leave an unconsumed SSE body, pinning the undici socket — a scripted `pi -p` run then never exits after the workflow settles (interactive TUI unaffected). Tracked upstream: https://github.com/earendil-works/pi/issues/11336
+`session.abort()` cancelling an in-flight streaming request was long suspected of pinning undici sockets and hanging scripted `pi -p` runs. A handle-forensics probe matrix (2026-10-24) exonerated pi: the hang was caused by our own `pi-idle-bark` extension (ref'd presence timers, fixed in bark v0.3.1 — timers now `unref`'d and scheduling skipped in headless runs). Budget-abort probes with bark removed exit 0; with bark ≥ v0.3.1 they also exit 0.
