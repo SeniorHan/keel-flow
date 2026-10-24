@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.7.0] — 围观视图、执行结构树、挂死预警 (2026-10-24)
+
+### Added
+
+- **执行结构树**: `parallel()`/`pipeline()` 压入执行上下文栈,agent 记录 `parentId`;`renderStructureTree` 渲染 `▾/└─/├─` 树——parallel 节点 `▶ 名称 · 4 thunk(运行 2 · 排队 2)`(limiter 队列深度),pipeline 节点 `▶ 管线 名称 · 1/3 完成` + item 行 `● item 1 阶段 1/2`;无结构节点时回退 phase 分组。结构随节点创建与 agent 生命周期(onAgentStart/End)经 `onStructure` 增量上报。
+- **围观视图**: `renderWorkflowView(snapshot, {now?,width?,maxLogs?})` 纯函数——头行(状态·进度·elapsed·疑似挂死)+ 左侧执行结构/回退树 + 右侧最近日志流(时间戳)+ 挂死预警(running agent 距 `lastEventAt` >30s 行尾 `⚠ 静默 Ns`,头行 `· 疑似挂死`,恢复自动消除);`/workflow view <id>` 渲染到 aboveEditor 大 widget,结束后自动清除。
+- **`now` 选项**: `WorkflowDisplayOptions.now` 驱动 elapsed 与静默计算(纯函数可测);`renderWorkflowLines` 的 agent 行(含未分组回退)也接挂死后缀。
+- `WorkflowAgentSnapshot.lastEventAt`、`StructureNode`、`PipelineItemState`、`WorkflowSnapshot.nodes/pipelineItems/queuedCount`;agent 事件经 `onAgentEvent` 外露(环形缓冲由扩展层持有)。
+
 ## [1.6.0] — 中文标签全套: transcript blocks, status line, background widget, notify, /workflow (2026-10-24)
 
 ### Changed

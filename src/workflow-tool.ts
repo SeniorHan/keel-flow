@@ -18,7 +18,6 @@ import {
   type WorkflowSnapshot,
 } from "./display.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunOptions, type WorkflowRunResult } from "./workflow.js";
-
 const workflowToolSchema = Type.Object({
   script: Type.String({
     description: [
@@ -207,6 +206,7 @@ export function createWorkflowTool(
           () => signal?.removeEventListener("abort", onAbort),
           finishAdopted,
           () => `${snapshot.doneCount}/${snapshot.agentCount}`,
+          () => snapshot,
         );
         statusInfo.backgroundId = entry.id;
         attachBackgroundWidget();
@@ -264,6 +264,7 @@ export function createWorkflowTool(
             () => signal?.removeEventListener("abort", onAbort),
             finishAdopted,
             () => `${snapshot.doneCount}/${snapshot.agentCount}`,
+            () => snapshot,
           );
           statusInfo.backgroundId = entry.id;
           attachBackgroundWidget();
@@ -370,7 +371,10 @@ function makeCallbacks(
   snapshot: WorkflowSnapshot,
   update: () => void,
   beforeAgentStart?: () => void,
-): Pick<WorkflowRunOptions, "onLog" | "onPhase" | "onAgentStart" | "onAgentEnd"> {
+): Pick<
+  WorkflowRunOptions,
+  "onLog" | "onPhase" | "onAgentStart" | "onAgentEnd" | "onAgentEvent" | "onPipelineItem" | "onStructure"
+> {
   const recordPhase = (title: string | undefined) => {
     if (!title) return;
     if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
@@ -394,6 +398,11 @@ function makeCallbacks(
         phase: event.phase,
         prompt: event.prompt,
         status: "running",
+        parentId: event.parentId,
+        queuedAt: event.queuedAt,
+        startedAt: Date.now(),
+        lastEventAt: Date.now(),
+        transcriptTail: [],
       });
       update();
     },
@@ -404,7 +413,25 @@ function makeCallbacks(
       if (agent) {
         agent.status = event.result === null ? "error" : "done";
         agent.resultPreview = preview(event.result);
+        agent.endedAt = Date.now();
+        agent.lastEventAt = agent.endedAt;
       }
+      update();
+    },
+    onAgentEvent(event) {
+      const agent = [...snapshot.agents].reverse().find((item) => item.label === event.label);
+      if (!agent) return;
+      agent.lastEventAt = event.at;
+      const tail = agent.transcriptTail ?? (agent.transcriptTail = []);
+      const prefix = event.kind === "tool" ? "⚙" : event.kind === "error" ? "✗" : "·";
+      tail.push(`${prefix} ${event.text}`);
+      if (tail.length > 5) tail.splice(0, tail.length - 5);
+      update();
+    },
+    onStructure(structure) {
+      snapshot.nodes = structure.nodes;
+      snapshot.pipelineItems = structure.pipelineItems;
+      snapshot.queuedCount = structure.queuedCount;
       update();
     },
   };
@@ -424,9 +451,11 @@ function adoptRun(
   cleanup?: () => void,
   onDone?: () => void,
   progress?: () => string,
+  getSnapshot?: () => WorkflowSnapshot,
 ): BackgroundWorkflow {
   const entry = registry.add(name, run, controller);
   if (progress) entry.progress = progress;
+  if (getSnapshot) entry.getSnapshot = getSnapshot;
   void run
     .then(
       (result): BackgroundSettlement => ({

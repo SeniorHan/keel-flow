@@ -25,8 +25,52 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
   signal?: AbortSignal;
   onLog?: (message: string) => void;
   onPhase?: (title: string) => void;
-  onAgentStart?: (event: { label: string; phase?: string; prompt: string }) => void;
+  onAgentStart?: (event: {
+    label: string;
+    phase?: string;
+    prompt: string;
+    /** When agent() was invoked (pre-limiter); drives the queued segment in timeline views. */
+    queuedAt?: number;
+    /** Structure node this agent was spawned under (parallel/pipeline scope). */
+    parentId?: number;
+  }) => void;
   onAgentEnd?: (event: { label: string; phase?: string; result: unknown }) => void;
+  /** Silent per-agent transcript event feed (drives lastEventAt staleness warnings). */
+  onAgentEvent?: (event: { label: string; at: number; kind: string; text: string }) => void;
+  /** Pipeline item progress: fired per item×stage transition. */
+  onPipelineItem?: (event: { itemIndex: number; stageIndex: number; stageCount: number; status: PipelineItemStatus }) => void;
+  /** Full execution-structure snapshot; fired whenever nodes/items/queue depth change. */
+  onStructure?: (structure: WorkflowStructure) => void;
+}
+
+export type PipelineItemStatus = "queued" | "running" | "done" | "failed";
+
+/** One execution-scope node in the run's structure tree (agents reference it via parentId). */
+export interface StructureNode {
+  id: number;
+  kind: "parallel" | "pipeline";
+  label?: string;
+  /** parallel: number of thunks; pipeline: number of items. */
+  thunkCount?: number;
+  itemCount?: number;
+  stageCount?: number;
+  /** Enclosing node, when a parallel/pipeline nests inside another scope. */
+  parentId?: number;
+}
+
+export interface PipelineItemState {
+  node: number;
+  itemIndex: number;
+  stageIndex: number;
+  stageCount: number;
+  status: PipelineItemStatus;
+}
+
+export interface WorkflowStructure {
+  nodes: StructureNode[];
+  pipelineItems: PipelineItemState[];
+  /** Limiter queue depth: agent() calls admitted but not yet started. */
+  queuedCount: number;
 }
 
 export interface WorkflowRunResult<T = unknown> {
@@ -57,6 +101,13 @@ interface RuntimeState {
   phases: string[];
   agentCount: number;
   spent: number;
+  /** Live execution-structure tree (parallel/pipeline scopes). */
+  nodes: StructureNode[];
+  pipelineItems: PipelineItemState[];
+  /** Monotonic structure-node id sequence (ids survive node pops). */
+  nodeSeq: number;
+  /** Label → last transcript/activity timestamp; refreshed on any agent event. */
+  lastEventAt: Map<string, number>;
 }
 
 type AnyNode = Node & { [key: string]: any; start: number; end: number };
@@ -74,7 +125,16 @@ export async function runWorkflow<T = unknown>(
 ): Promise<WorkflowRunResult<T>> {
   const started = Date.now();
   const { meta, body } = parseWorkflowScript(script);
-  const state: RuntimeState = { logs: [], phases: [], agentCount: 0, spent: 0 };
+  const state: RuntimeState = {
+    logs: [],
+    phases: [],
+    agentCount: 0,
+    spent: 0,
+    nodes: [],
+    pipelineItems: [],
+    nodeSeq: 0,
+    lastEventAt: new Map(),
+  };
   const agentRunner = options.agent ?? new WorkflowAgent(options);
   const concurrency = Math.max(
     1,
@@ -82,6 +142,37 @@ export async function runWorkflow<T = unknown>(
   );
   const limiter = createLimiter(concurrency);
   const pendingAgentRuns = new Set<Promise<unknown>>();
+
+  const emitStructure = () => {
+    if (!options.onStructure) return;
+    options.onStructure({
+      nodes: state.nodes.map((node) => ({ ...node })),
+      pipelineItems: state.pipelineItems.map((item) => ({ ...item })),
+      queuedCount: limiter.queued(),
+    });
+  };
+
+  const pushNode = (node: Omit<StructureNode, "id">): StructureNode => {
+    const created: StructureNode = { ...node, id: ++state.nodeSeq };
+    state.nodes.push(created);
+    emitStructure();
+    return created;
+  };
+
+  const setPipelineItem = (
+    node: number,
+    itemIndex: number,
+    stageIndex: number,
+    stageCount: number,
+    status: PipelineItemStatus,
+  ) => {
+    const existing = state.pipelineItems.find((item) => item.node === node && item.itemIndex === itemIndex);
+    const next: PipelineItemState = { node, itemIndex, stageIndex, stageCount, status };
+    if (existing) Object.assign(existing, next);
+    else state.pipelineItems.push(next);
+    options.onPipelineItem?.({ itemIndex, stageIndex, stageCount, status });
+    emitStructure();
+  };
 
   const log = (message: string) => {
     const text = String(message);
@@ -115,10 +206,14 @@ export async function runWorkflow<T = unknown>(
     const budgetTokens = resolveAgentBudget(normalizedOptions.budgetTokens);
     const assignedPhase = normalizedOptions.phase ?? state.currentPhase;
     const requestedLabel = normalizedOptions.label?.trim();
+    const queuedAt = Date.now();
+    const parentNode = [...state.nodes].reverse()[0];
     const run = limiter(async () => {
       state.agentCount++;
       const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
-      options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt });
+      state.lastEventAt.set(label, Date.now());
+      options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt, queuedAt, parentId: parentNode?.id });
+      emitStructure();
       const timeoutTimer =
         timeoutMs > 0
           ? setTimeout(() => {
@@ -137,15 +232,23 @@ export async function runWorkflow<T = unknown>(
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
           timeoutMs,
           budgetTokens,
+          onEvent: (event: { at: number; kind: string; text: string }) => {
+            state.lastEventAt.set(label, event.at);
+            options.onAgentEvent?.({ label, at: event.at, kind: event.kind, text: event.text });
+          },
         } as any);
         throwIfAborted();
         state.spent += estimateTokens(result);
+        state.lastEventAt.set(label, Date.now());
         options.onAgentEnd?.({ label, phase: assignedPhase, result });
+        emitStructure();
         return result;
       } catch (error) {
         if (options.signal?.aborted) throw error;
+        state.lastEventAt.set(label, Date.now());
         log(`agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
         options.onAgentEnd?.({ label, phase: assignedPhase, result: null });
+        emitStructure();
         return null;
       } finally {
         if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -165,17 +268,24 @@ export async function runWorkflow<T = unknown>(
     if (thunks.some((thunk) => typeof thunk !== "function")) {
       throw new TypeError("parallel() expects an array of functions, not promises. Wrap each call: () => agent(...)");
     }
-    return Promise.all(
-      thunks.map(async (thunk, index) => {
-        try {
-          return await thunk();
-        } catch (error) {
-          if (options.signal?.aborted) throw error;
-          log(`parallel[${index}] failed: ${error instanceof Error ? error.message : String(error)}`);
-          return null;
-        }
-      }),
-    );
+    const node = pushNode({ kind: "parallel", thunkCount: thunks.length, parentId: [...state.nodes].reverse()[0]?.id });
+    try {
+      return await Promise.all(
+        thunks.map(async (thunk, index) => {
+          try {
+            return await thunk();
+          } catch (error) {
+            if (options.signal?.aborted) throw error;
+            log(`parallel[${index}] failed: ${error instanceof Error ? error.message : String(error)}`);
+            return null;
+          }
+        }),
+      );
+    } finally {
+      emitStructure();
+      state.nodes = state.nodes.filter((entry) => entry !== node);
+      emitStructure();
+    }
   };
 
   const pipeline = async (
@@ -187,23 +297,39 @@ export async function runWorkflow<T = unknown>(
     if (stages.some((stage) => typeof stage !== "function")) {
       throw new TypeError("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
     }
-    return Promise.all(
-      items.map(async (item, index) => {
-        let value: unknown = item;
-        for (const stage of stages) {
-          try {
-            throwIfAborted();
-            value = await stage(value, item, index);
-            throwIfAborted();
-          } catch (error) {
-            if (options.signal?.aborted) throw error;
-            log(`pipeline[${index}] failed: ${error instanceof Error ? error.message : String(error)}`);
-            return null;
+    const node = pushNode({
+      kind: "pipeline",
+      label: `管线 ${items.length}×${stages.length}`,
+      itemCount: items.length,
+      stageCount: stages.length,
+      parentId: [...state.nodes].reverse()[0]?.id,
+    });
+    try {
+      return await Promise.all(
+        items.map(async (item, index) => {
+          let value: unknown = item;
+          for (let stageIndex = 0; stageIndex < stages.length; stageIndex++) {
+            try {
+              throwIfAborted();
+              setPipelineItem(node.id, index, stageIndex + 1, stages.length, "running");
+              value = await stages[stageIndex](value, item, index);
+              throwIfAborted();
+              setPipelineItem(node.id, index, stageIndex + 1, stages.length, "done");
+            } catch (error) {
+              if (options.signal?.aborted) throw error;
+              setPipelineItem(node.id, index, stageIndex + 1, stages.length, "failed");
+              log(`pipeline[${index}] failed: ${error instanceof Error ? error.message : String(error)}`);
+              return null;
+            }
           }
-        }
-        return value;
-      }),
-    );
+          return value;
+        }),
+      );
+    } finally {
+      emitStructure();
+      state.nodes = state.nodes.filter((entry) => entry !== node);
+      emitStructure();
+    }
   };
 
   const context = vm.createContext({
@@ -410,13 +536,19 @@ function validateMeta(meta: unknown): asserts meta is WorkflowMeta {
 
 function createLimiter(limit: number) {
   let active = 0;
+  let queued = 0;
   const queue: Array<() => void> = [];
   const next = () => {
     active--;
-    queue.shift()?.();
+    const wake = queue.shift();
+    if (wake) queued--;
+    wake?.();
   };
-  return async <T>(fn: () => Promise<T>): Promise<T> => {
-    if (active >= limit) await new Promise<void>((resolve) => queue.push(resolve));
+  const run = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= limit) {
+      queued++;
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
     active++;
     try {
       return await fn();
@@ -424,6 +556,8 @@ function createLimiter(limit: number) {
       next();
     }
   };
+  (run as typeof run & { queued(): number }).queued = () => queued;
+  return run as typeof run & { queued(): number };
 }
 
 function requireString(value: unknown, name: string): string {

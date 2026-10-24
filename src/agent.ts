@@ -4,6 +4,7 @@ import {
   createAgentSession,
   createCodingTools,
   getAgentDir,
+  type AgentSessionEvent,
   SessionManager,
   SettingsManager,
   type ToolDefinition,
@@ -21,12 +22,45 @@ export interface WorkflowAgentOptions {
   instructions?: string;
 }
 
+/** One observed subagent transcript event (assistant text / tool name / error). Memory only, never persisted. */
+export interface AgentTranscriptEvent {
+  at: number;
+  kind: "text" | "tool" | "error";
+  text: string;
+}
+
+/** Ring buffer of recent transcript events; keeps the newest `cap` entries. */
+export class TranscriptRing {
+  private readonly events: AgentTranscriptEvent[] = [];
+
+  constructor(private readonly cap = 200) {}
+
+  push(event: AgentTranscriptEvent): void {
+    this.events.push(event);
+    if (this.events.length > this.cap) this.events.splice(0, this.events.length - this.cap);
+  }
+
+  recent(count = this.cap): AgentTranscriptEvent[] {
+    return this.events.slice(-count);
+  }
+
+  get size(): number {
+    return this.events.length;
+  }
+}
+
+const TRANSCRIPT_SNIPPET_CAP = 200;
+/** Per-label rings kept on a WorkflowAgent instance; oldest labels are dropped past this many. */
+const TRANSCRIPT_LABEL_CAP = 50;
+
 export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefined> {
   label?: string;
   schema?: TSchemaDef;
   tools?: ToolDefinition[];
   instructions?: string;
   signal?: AbortSignal;
+  /** Silent observer for transcript events (workflow layer feeds lastEventAt/围观); not exposed to scripts. */
+  onEvent?: (event: AgentTranscriptEvent) => void;
   /** Report-only supervision timer (ms); the workflow layer resolves 0 → 60s default. Informational here. */
   timeoutMs?: number;
   /** Input-token budget; unset/0 disables. Over → the session is aborted and the run throws. */
@@ -84,11 +118,56 @@ export function startBudgetWatch(
   return { stop };
 }
 
+/** Map a session event to a transcript record; undefined = not worth surfacing. */
+function transcriptEventOf(event: AgentSessionEvent): Omit<AgentTranscriptEvent, "at"> | undefined {
+  if (event.type === "message_end" && (event.message as { role?: string }).role === "assistant") {
+    const content = (event.message as { content?: Array<{ type: string; text?: string }> }).content ?? [];
+    const text = content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
+      .join("")
+      .trim();
+    if (!text) return undefined;
+    return {
+      kind: "text",
+      text: text.length > TRANSCRIPT_SNIPPET_CAP ? `${text.slice(0, TRANSCRIPT_SNIPPET_CAP - 1)}…` : text,
+    };
+  }
+  if (event.type === "tool_execution_start") return { kind: "tool", text: event.toolName };
+  if (event.type === "tool_execution_end" && event.isError) {
+    const raw = typeof event.result === "string" ? event.result : JSON.stringify(event.result ?? "");
+    return {
+      kind: "error",
+      text: raw.length > TRANSCRIPT_SNIPPET_CAP ? `${raw.slice(0, TRANSCRIPT_SNIPPET_CAP - 1)}…` : raw,
+    };
+  }
+  return undefined;
+}
+
 export class WorkflowAgent {
   private readonly cwd: string;
   private readonly baseTools: ToolDefinition[];
   private readonly sessionOptions: Partial<CreateAgentSessionOptions>;
   private readonly instructions?: string;
+  private readonly transcripts = new Map<string, TranscriptRing>();
+
+  /** Recent transcript events for a label (ring buffer, cap 200, memory only). */
+  observeTranscript(label: string): AgentTranscriptEvent[] {
+    return this.transcripts.get(label)?.recent() ?? [];
+  }
+
+  private transcriptRing(label: string): TranscriptRing {
+    let ring = this.transcripts.get(label);
+    if (!ring) {
+      if (this.transcripts.size >= TRANSCRIPT_LABEL_CAP) {
+        const oldest = this.transcripts.keys().next().value;
+        if (oldest !== undefined) this.transcripts.delete(oldest);
+      }
+      ring = new TranscriptRing();
+      this.transcripts.set(label, ring);
+    }
+    return ring;
+  }
 
   constructor(options: WorkflowAgentOptions = {}) {
     this.cwd = options.cwd ?? process.cwd();
@@ -119,6 +198,18 @@ export class WorkflowAgent {
     });
 
     let removeAbortListener: (() => void) | undefined;
+    let removeTranscriptListener: (() => void) | undefined;
+    if (options.label) {
+      const ring = this.transcriptRing(options.label);
+      const onTranscript = (event: AgentSessionEvent) => {
+        const record = transcriptEventOf(event);
+        if (!record) return;
+        const stamped: AgentTranscriptEvent = { at: Date.now(), ...record };
+        ring.push(stamped);
+        options.onEvent?.(stamped);
+      };
+      removeTranscriptListener = session.subscribe(onTranscript);
+    }
     let budgetWatch: { stop: () => void } | undefined;
     let budgetAbort: { spent: UsageTotals } | undefined;
     try {
@@ -164,6 +255,7 @@ export class WorkflowAgent {
     } finally {
       budgetWatch?.stop();
       removeAbortListener?.();
+      removeTranscriptListener?.();
       session.dispose();
     }
   }

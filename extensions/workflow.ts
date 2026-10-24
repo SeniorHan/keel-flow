@@ -5,13 +5,42 @@ import {
   settlementNotifyLine,
   settlementText,
 } from "../src/background.js";
+import { renderWorkflowView } from "../src/display.js";
 import { createWorkflowCancelTool, createWorkflowTool, type WorkflowToolExtras } from "../src/index.js";
+
+const VIEW_WIDGET_KEY = "workflow-view";
+/** 围观 widget auto-refresh cadence; Esc can't be intercepted in widget mode, so this keeps it live. */
+const VIEW_REFRESH_MS = 60_000;
 
 export default function workflowExtension(pi: ExtensionAPI): void {
   const registry = new BackgroundRegistry();
   // Set once the workflow tool executes; lets onSettle notify the TUI from the
   // extension scope (settlements fire outside any tool call).
   const uiRef: { current?: Pick<ExtensionContext["ui"], "notify"> } = { current: undefined };
+  // 围观 state: which run is on screen + the auto-refresh timer (cleared on settle/toggle).
+  const view: { id?: string; timer?: ReturnType<typeof setInterval> } = {};
+
+  const closeView = (ctx: Pick<ExtensionContext, "ui" | "hasUI">, reason?: string): void => {
+    if (view.timer) clearInterval(view.timer);
+    view.timer = undefined;
+    view.id = undefined;
+    if (ctx.hasUI) ctx.ui.setWidget(VIEW_WIDGET_KEY, undefined);
+    if (reason) ctx.ui.notify(reason);
+  };
+
+  const renderView = (ctx: Pick<ExtensionContext, "ui" | "hasUI">): void => {
+    if (!ctx.hasUI || view.id === undefined) return;
+    const entry = registry.get(view.id);
+    if (!entry?.getSnapshot) {
+      closeView(ctx, `${view.id} 已结束,围观视图已清除。`);
+      return;
+    }
+    ctx.ui.setWidget(
+      VIEW_WIDGET_KEY,
+      renderWorkflowView(entry.getSnapshot()).map((line) => `  ${line}`),
+      { placement: "aboveEditor" },
+    );
+  };
 
   const onSettle = (settlement: BackgroundSettlement): void => {
     // Same shape as keel-crew's settlement notifications: hidden custom message
@@ -26,13 +55,16 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       { triggerTurn: true },
     );
     uiRef.current?.notify(settlementNotifyLine(settlement));
+    if (view.id === settlement.id && uiRef.current) {
+      closeView({ ui: uiRef.current, hasUI: true }, `${settlement.id} 已结束,围观视图已清除。`);
+    }
   };
 
   const tool = createWorkflowTool({ registry, onSettle, uiRef });
   pi.registerTool(tool);
   pi.registerTool(createWorkflowCancelTool(registry));
   pi.registerCommand("workflow", {
-    description: "列出/取消后台 workflow",
+    description: "列出/取消/围观后台 workflow",
     async handler(args, ctx) {
       const cancelMatch = args.match(/^cancel\s+(wf-\d+)$/);
       if (cancelMatch) {
@@ -43,8 +75,31 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         }
         return;
       }
+      const viewMatch = args.match(/^view(?:\s+(wf-\d+))?$/);
+      if (viewMatch) {
+        if (view.id !== undefined && (!viewMatch[1] || viewMatch[1] === view.id)) {
+          closeView(ctx, "已关闭围观视图。");
+          return;
+        }
+        const target = viewMatch[1] ?? registry.list().at(-1)?.id;
+        if (!target || !registry.get(target)?.getSnapshot) {
+          closeView(ctx);
+          const running = registry.list().map((entry) => entry.id);
+          ctx.ui.notify(
+            running.length ? `没有可围观的 ${target ?? ""};运行中:${running.join(", ")}` : "没有后台工作流可围观。",
+            "warning",
+          );
+          return;
+        }
+        view.id = target;
+        renderView(ctx);
+        if (view.timer) clearInterval(view.timer);
+        view.timer = setInterval(() => renderView(ctx), VIEW_REFRESH_MS);
+        ctx.ui.notify(`围观 ${target}:/workflow view 关闭,60s 自动刷新,结束自动清除。`);
+        return;
+      }
       if (args.trim()) {
-        ctx.ui.notify("用法:/workflow 列出运行 · /workflow cancel wf-N 请求取消", "warning");
+        ctx.ui.notify("用法:/workflow 列出运行 · /workflow view [wf-N] 围观 · /workflow cancel wf-N 取消", "warning");
         return;
       }
       const running = registry.list();

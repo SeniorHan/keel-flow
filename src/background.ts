@@ -1,3 +1,4 @@
+import type { WorkflowSnapshot } from "./display.js";
 import type { WorkflowRunResult } from "./workflow.js";
 
 export interface BackgroundWorkflow {
@@ -8,6 +9,8 @@ export interface BackgroundWorkflow {
   run: Promise<WorkflowRunResult>;
   /** Live done/total agent counts, wired up by the tool; drives the /workflow list line. */
   progress?: () => string;
+  /** Live snapshot getter, wired up by the tool; drives /workflow view and export. */
+  getSnapshot?: () => WorkflowSnapshot;
 }
 
 export interface BackgroundSettlement {
