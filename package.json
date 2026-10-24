@@ -1,6 +1,6 @@
 {
   "name": "keel-flow",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Keel fork of pi-dynamic-workflows: trimmed model-facing text, deterministic subagent orchestration for Pi.",
   "type": "module",
   "main": "./dist/index.js",

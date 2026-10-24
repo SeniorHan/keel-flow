@@ -1,10 +1,10 @@
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import {
+  type AgentSessionEvent,
   type CreateAgentSessionOptions,
   createAgentSession,
   createCodingTools,
   getAgentDir,
-  type AgentSessionEvent,
   SessionManager,
   SettingsManager,
   type ToolDefinition,

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1] — HTML 运行报告导出 (2026-10-24)
+
+### Added
+
+- **`/workflow export wf-N`**: 将已结束的后台工作流导出为自包含静态 HTML 运行报告(`os.tmpdir()/keel-flow-wf-N.html`)——时间轴甘特(按 phase 泳道、状态色条、错误可展开、子代理尾巴)+ 汇总卡 + 执行结构树 + 运行结果 JSON。零外部资源(无 CDN/字体/脚本),断网可开;数据源为结算历史(最近 8 个 run 的终态快照,`background: true` 与 tap-to-background 均落入)。
+- `exportRunHtml(snapshot, {id?, now?})` 纯函数从 `src/export-html.ts` 导出;`WorkflowAgentSnapshot.endedAt`/`transcriptTail` 喂给甘特与尾巴渲染。
+
 ## [1.7.0] — 围观视图、执行结构树、挂死预警 (2026-10-24)
 
 ### Added

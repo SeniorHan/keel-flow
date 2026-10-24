@@ -38,7 +38,12 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
   /** Silent per-agent transcript event feed (drives lastEventAt staleness warnings). */
   onAgentEvent?: (event: { label: string; at: number; kind: string; text: string }) => void;
   /** Pipeline item progress: fired per item×stage transition. */
-  onPipelineItem?: (event: { itemIndex: number; stageIndex: number; stageCount: number; status: PipelineItemStatus }) => void;
+  onPipelineItem?: (event: {
+    itemIndex: number;
+    stageIndex: number;
+    stageCount: number;
+    status: PipelineItemStatus;
+  }) => void;
   /** Full execution-structure snapshot; fired whenever nodes/items/queue depth change. */
   onStructure?: (structure: WorkflowStructure) => void;
 }

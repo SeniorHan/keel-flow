@@ -218,7 +218,9 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
     for (const agent of visibleAgents) {
       const order = `#${agent.id}`;
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
-      lines.push(`    ${order} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${silenceSuffix(agent, now)}${result}`);
+      lines.push(
+        `    ${order} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${silenceSuffix(agent, now)}${result}`,
+      );
     }
     if (agents.length > visibleAgents.length) lines.push(`    … ${agents.length - visibleAgents.length} 更早的子代理`);
   }
@@ -228,7 +230,9 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
     lines.push("  未分组");
     for (const agent of unphased.slice(-maxAgents)) {
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
-      lines.push(`    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${silenceSuffix(agent, now)}${result}`);
+      lines.push(
+        `    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${silenceSuffix(agent, now)}${result}`,
+      );
     }
   }
 
@@ -425,12 +429,16 @@ export function renderWorkflowView(snapshot: WorkflowSnapshot, options: Workflow
     ? renderStructureTree(snapshot.nodes, snapshot.pipelineItems, snapshot.queuedCount, snapshot.agents, now)
     : renderWorkflowLines(snapshot, { maxAgents: 6, maxLogs: 0, now }).slice(1);
 
-  const logLines = snapshot.logs.slice(-maxLogs).map((log) => truncateToWidth(`[${formatClock(now)}] ${log}`, rightWidth));
+  const logLines = snapshot.logs
+    .slice(-maxLogs)
+    .map((log) => truncateToWidth(`[${formatClock(now)}] ${log}`, rightWidth));
   const logHeader = `最近日志${snapshot.logs.length > maxLogs ? `(末 ${maxLogs} 条)` : ""}`;
 
   const rows = Math.max(treeLines.length, logLines.length);
   const lines: string[] = [header, "─".repeat(width)];
-  lines.push(`${padToWidth(truncateToWidth("执行结构", leftWidth), leftWidth)}│${truncateToWidth(logHeader, rightWidth)}`);
+  lines.push(
+    `${padToWidth(truncateToWidth("执行结构", leftWidth), leftWidth)}│${truncateToWidth(logHeader, rightWidth)}`,
+  );
   for (let i = 0; i < rows; i++) {
     const left = truncateToWidth(treeLines[i] ?? "", leftWidth);
     const right = logLines[i] ?? "";

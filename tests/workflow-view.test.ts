@@ -3,11 +3,11 @@ import test from "node:test";
 import { TranscriptRing } from "../src/agent.js";
 import {
   hasHungAgents,
+  recomputeWorkflowSnapshot,
   renderStructureTree,
   renderWorkflowView,
-  recomputeWorkflowSnapshot,
-  silenceSuffix,
   type StructureNode,
+  silenceSuffix,
   type WorkflowAgentSnapshot,
   type WorkflowSnapshot,
 } from "../src/display.js";
@@ -94,11 +94,11 @@ test("renderStructureTree shows pipeline items with stage progress", () => {
 });
 
 test("renderWorkflowView falls back to phase grouping when there are no structure nodes", () => {
-  const lines = renderWorkflowView(
-    viewSnapshot({ phases: ["Scan"], agents: [agent({ id: 1 })] }),
-    { now: NOW },
+  const lines = renderWorkflowView(viewSnapshot({ phases: ["Scan"], agents: [agent({ id: 1 })] }), { now: NOW });
+  assert.ok(
+    lines.some((line) => line.includes("Scan 1/1") || line.includes("▶ Scan 0/1")),
+    lines.join("\n"),
   );
-  assert.ok(lines.some((line) => line.includes("Scan 1/1") || line.includes("▶ Scan 0/1")), lines.join("\n"));
 });
 
 test("挂死预警: running agent silent >30s gets ⚠ 静默 and the header flags 疑似挂死; recovery clears it", () => {
@@ -164,7 +164,10 @@ return { a, b }
     withItems.at(-1)!.pipelineItems.map((i: any) => i.status),
     ["done", "done"],
   );
-  assert.ok(structures.some((s) => s.queuedCount > 0), "concurrency 1 forces limiter queueing");
+  assert.ok(
+    structures.some((s) => s.queuedCount > 0),
+    "concurrency 1 forces limiter queueing",
+  );
   const left = started.find((s) => s.label === "left");
   assert.ok(left?.parentId, "agents record the parallel node as parent");
 });
@@ -180,7 +183,10 @@ return 1
     {
       cwd: "/tmp/keel-flow-test",
       agent: {
-        run: async (_prompt: string, options?: { onEvent?: (e: { at: number; kind: string; text: string }) => void }) => {
+        run: async (
+          _prompt: string,
+          options?: { onEvent?: (e: { at: number; kind: string; text: string }) => void },
+        ) => {
           options?.onEvent?.({ at: Date.now(), kind: "tool", text: "read" });
           options?.onEvent?.({ at: Date.now(), kind: "text", text: "thinking" });
           return "ok";

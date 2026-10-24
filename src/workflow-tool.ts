@@ -18,6 +18,7 @@ import {
   type WorkflowSnapshot,
 } from "./display.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunOptions, type WorkflowRunResult } from "./workflow.js";
+
 const workflowToolSchema = Type.Object({
   script: Type.String({
     description: [
@@ -86,6 +87,8 @@ export interface WorkflowToolOptions {
   registry?: BackgroundRegistry;
   /** 扩展层传入的 ui 引用:execute 时写入 ctx.ui,结算由扩展层 notify TUI。 */
   uiRef?: { current?: Pick<ExtensionContext["ui"], "notify"> };
+  /** 结算历史:后台 run settle 时存入终态快照(容量由写入侧控制),/workflow export 的数据源。 */
+  history?: Map<string, WorkflowSnapshot>;
 }
 
 export function createWorkflowTool(
@@ -161,12 +164,21 @@ export function createWorkflowTool(
         extraDisplays.push(widget);
         widget.update(snapshot);
       };
+      let entryId: string | undefined;
       const finishAdopted = (): void => {
         snapshot = recomputeWorkflowSnapshot(snapshot);
         display.complete(snapshot);
         for (const widget of extraDisplays) widget.complete(snapshot);
         for (const widget of extraDisplays) widget.clear();
         extraDisplays.length = 0;
+        if (options.history && entryId !== undefined) {
+          options.history.set(entryId, snapshot);
+          while (options.history.size > 8) {
+            const oldest = options.history.keys().next().value;
+            if (oldest === undefined) break;
+            options.history.delete(oldest);
+          }
+        }
       };
 
       // In-place recompute: keep the snapshot object identity stable so the shared
@@ -208,6 +220,7 @@ export function createWorkflowTool(
           () => `${snapshot.doneCount}/${snapshot.agentCount}`,
           () => snapshot,
         );
+        entryId = entry.id;
         statusInfo.backgroundId = entry.id;
         attachBackgroundWidget();
         return {
@@ -267,6 +280,7 @@ export function createWorkflowTool(
             () => snapshot,
           );
           statusInfo.backgroundId = entry.id;
+          entryId = entry.id;
           attachBackgroundWidget();
           resolveDetached(entry);
           return entry;
@@ -422,7 +436,8 @@ function makeCallbacks(
       const agent = [...snapshot.agents].reverse().find((item) => item.label === event.label);
       if (!agent) return;
       agent.lastEventAt = event.at;
-      const tail = agent.transcriptTail ?? (agent.transcriptTail = []);
+      if (!agent.transcriptTail) agent.transcriptTail = [];
+      const tail = agent.transcriptTail;
       const prefix = event.kind === "tool" ? "⚙" : event.kind === "error" ? "✗" : "·";
       tail.push(`${prefix} ${event.text}`);
       if (tail.length > 5) tail.splice(0, tail.length - 5);

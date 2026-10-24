@@ -6,6 +6,7 @@ import {
   settlementText,
 } from "../src/background.js";
 import { renderWorkflowView } from "../src/display.js";
+import { exportRunHtml } from "../src/export-html.js";
 import { createWorkflowCancelTool, createWorkflowTool, type WorkflowToolExtras } from "../src/index.js";
 
 const VIEW_WIDGET_KEY = "workflow-view";
@@ -60,7 +61,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     }
   };
 
-  const tool = createWorkflowTool({ registry, onSettle, uiRef });
+  const history = new Map<string, import("../src/display.js").WorkflowSnapshot>();
+  const tool = createWorkflowTool({ registry, onSettle, uiRef, history });
   pi.registerTool(tool);
   pi.registerTool(createWorkflowCancelTool(registry));
   pi.registerCommand("workflow", {
@@ -98,8 +100,26 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`围观 ${target}:/workflow view 关闭,60s 自动刷新,结束自动清除。`);
         return;
       }
+      const exportMatch = args.match(/^export\s+(wf-\d+)$/);
+      if (exportMatch) {
+        const snapshot = history.get(exportMatch[1]);
+        if (!snapshot) {
+          ctx.ui.notify(`${exportMatch[1]} 无已结算快照(未知 id、尚未结束或已被清出历史)。`, "warning");
+          return;
+        }
+        const { writeFileSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const { tmpdir } = await import("node:os");
+        const path = join(tmpdir(), `keel-flow-${exportMatch[1]}.html`);
+        writeFileSync(path, exportRunHtml(snapshot, { id: exportMatch[1] }));
+        ctx.ui.notify(`已导出: ${path}`);
+        return;
+      }
       if (args.trim()) {
-        ctx.ui.notify("用法:/workflow 列出运行 · /workflow view [wf-N] 围观 · /workflow cancel wf-N 取消", "warning");
+        ctx.ui.notify(
+          "用法:/workflow 列出运行 · /workflow view [wf-N] 围观 · /workflow cancel wf-N 取消 · /workflow export wf-N 导出报告",
+          "warning",
+        );
         return;
       }
       const running = registry.list();
