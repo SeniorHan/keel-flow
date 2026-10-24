@@ -179,6 +179,8 @@ class WorkflowDialog implements Component {
     else if (keys.matches(data, "tui.select.confirm")) key = "enter";
     else if (keys.matches(data, "tui.select.up")) key = "up";
     else if (keys.matches(data, "tui.select.down")) key = "down";
+    else if (data === "j") key = "down";
+    else if (data === "k") key = "up";
     else if (data === "q") key = "q";
     if (!key) return;
     this.state = handleKey(this.state, key);
