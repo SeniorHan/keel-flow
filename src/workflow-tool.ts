@@ -171,6 +171,7 @@ export function createWorkflowTool(
         for (const widget of extraDisplays) widget.complete(snapshot);
         for (const widget of extraDisplays) widget.clear();
         extraDisplays.length = 0;
+        snapshot.durationMs ??= Math.max(0, Date.now() - (snapshot.startedAt ?? Date.now()));
         if (options.history && entryId !== undefined) {
           options.history.set(entryId, snapshot);
           while (options.history.size > 8) {

@@ -272,7 +272,8 @@ export function renderStatusLine(
     const sorted = [...peers].sort((a, b) => peerId(b.id) - peerId(a.id));
     const shown = sorted.slice(0, 2).map((peer) => `${peer.id} ${marks[peer.state]}`);
     const rest = sorted.length - shown.length;
-    return `workflow: ${peers.length} 后台 · ${shown.join(" · ")}${rest > 0 ? ` · …+${rest}` : ""}`;
+    const runningCount = peers.filter((peer) => peer.state === "running").length;
+    return `workflow: ${runningCount} 运行中 · ${shown.join(" · ")}${rest > 0 ? ` · …+${rest}` : ""}`;
   }
   const elapsed =
     snapshot.startedAt !== undefined ? ` · ${Math.max(0, Math.round((Date.now() - snapshot.startedAt) / 1000))}s` : "";
