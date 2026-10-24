@@ -206,6 +206,6 @@ test("renderStatusLine aggregates multiple background runs and folds beyond two"
   const three: StatusPeer[] = [...peers, { id: "wf-0", state: "failed" }];
   assert.equal(
     renderStatusLine(snapshot(), false, { backgroundId: "wf-2", peers: three }),
-    "workflow: 3 后台 · wf-2 ⏵ · wf-1 ✓ · …+1",
+    "workflow: 1 运行中 · wf-2 ⏵ · wf-1 ✓ · …+1",
   );
 });
