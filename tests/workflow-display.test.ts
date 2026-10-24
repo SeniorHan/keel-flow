@@ -4,8 +4,10 @@ import {
   createWidgetWorkflowDisplay,
   createWorkflowSnapshot,
   recomputeWorkflowSnapshot,
+  renderStatusLine,
   renderWorkflowLines,
   renderWorkflowText,
+  type StatusPeer,
   type WorkflowAgentSnapshot,
   type WorkflowSnapshot,
 } from "../src/display.js";
@@ -100,9 +102,9 @@ test("renderWorkflowText respects log limits", () => {
     { maxLogs: 1 },
   );
 
-  assert.doesNotMatch(text, /log: first/);
-  assert.doesNotMatch(text, /log: second/);
-  assert.match(text, /log: third/);
+  assert.doesNotMatch(text, /日志: first/);
+  assert.doesNotMatch(text, /日志: second/);
+  assert.match(text, /日志: third/);
 });
 
 test("renderWorkflowLines separates logs from progress", () => {
@@ -113,7 +115,7 @@ test("renderWorkflowLines separates logs from progress", () => {
     }),
   );
 
-  const logIndex = lines.findIndex((line) => line.includes("log: finished scan"));
+  const logIndex = lines.findIndex((line) => line.includes("日志: finished scan"));
   assert.ok(logIndex > 0);
   assert.equal(lines[logIndex - 1], "");
 });
@@ -151,7 +153,7 @@ test("widget display shows the completed status line and honors showWidget:false
 
   const display = createWidgetWorkflowDisplay(ctx, { key: "wf", showStatus: true, showWidget: false });
   display.complete(done);
-  assert.equal(calls.status, "workflow ✓ demo_workflow: 1/1");
+  assert.equal(calls.status, "workflow ✓ demo_workflow 1/1");
   assert.equal(calls.widget, undefined, "showWidget:false skips setWidget");
 });
 
@@ -159,6 +161,51 @@ test("widget display default shows the widget with the running status line", () 
   const { calls, ctx } = widgetCtx();
   const display = createWidgetWorkflowDisplay(ctx, { key: "wf", showStatus: true });
   display.update(snapshot({ agents: [agent({ status: "running" })], startedAt: Date.now() - 5200 }));
-  assert.match(calls.status ?? "", /workflow demo_workflow: 1 running, 0\/1 done/);
+  assert.match(calls.status ?? "", /workflow demo_workflow ● 1 运行中, 0\/1 完成 · 5s/);
   assert.ok(calls.widget?.[0].includes(" · 5s"));
+});
+
+test("renderWorkflowText renders Chinese headers and honors the detached override", () => {
+  const running = renderWorkflowText(snapshot({ agents: [agent({ status: "running" })] }));
+  assert.ok(running.startsWith("工作流运行中\n◆ 工作流: demo_workflow (0/1 完成, 1 运行中)"));
+
+  const done = renderWorkflowText(snapshot({ agents: [agent()] }), true);
+  assert.ok(done.startsWith("工作流已完成\n"));
+
+  const detached = renderWorkflowText(snapshot({ agents: [agent({ status: "running" })] }), false, {
+    header: "工作流已转后台 (wf-2)",
+  });
+  assert.ok(detached.startsWith("工作流已转后台 (wf-2)\n"));
+});
+
+test("renderStatusLine covers foreground, background, terminal and aggregate forms", () => {
+  const running = snapshot({ agents: [agent({ status: "running" })], startedAt: Date.now() - 18_000 });
+  assert.match(renderStatusLine(running, false), /^workflow demo_workflow ● 1 运行中, 0\/1 完成 · 18s$/);
+
+  const background = snapshot({ agents: [agent({ status: "running" })], startedAt: Date.now() - 47_000 });
+  assert.match(
+    renderStatusLine(background, false, { backgroundId: "wf-2" }),
+    /^workflow demo_workflow ⏵ wf-2 · 0\/1 完成 · 47s$/,
+  );
+
+  const done = snapshot({ agents: [agent()], durationMs: 76_400 });
+  assert.equal(renderStatusLine(done, true), "workflow ✓ demo_workflow 1/1 · 76s");
+
+  const failed = snapshot({ agents: [agent(), agent({ id: 2, status: "error", label: "boom" })] });
+  assert.equal(renderStatusLine(failed, true), "workflow ✗ demo_workflow 1/2 · 1 错误");
+});
+
+test("renderStatusLine aggregates multiple background runs and folds beyond two", () => {
+  const peers: StatusPeer[] = [
+    { id: "wf-2", state: "running" },
+    { id: "wf-1", state: "done" },
+  ];
+  const line = renderStatusLine(snapshot(), false, { backgroundId: "wf-2", peers });
+  assert.equal(line, "workflow: 2 后台 · wf-2 ⏵ · wf-1 ✓");
+
+  const three: StatusPeer[] = [...peers, { id: "wf-0", state: "failed" }];
+  assert.equal(
+    renderStatusLine(snapshot(), false, { backgroundId: "wf-2", peers: three }),
+    "workflow: 3 后台 · wf-2 ⏵ · wf-1 ✓ · …+1",
+  );
 });

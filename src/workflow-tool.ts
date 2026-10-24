@@ -6,10 +6,15 @@ import type { WorkflowAgent } from "./agent.js";
 import type { BackgroundRegistry, BackgroundSettlement, BackgroundWorkflow } from "./background.js";
 import {
   createToolUpdateWorkflowDisplay,
+  createWidgetWorkflowDisplay,
   createWorkflowSnapshot,
   preview,
   recomputeWorkflowSnapshot,
   renderWorkflowText,
+  type StatusPeer,
+  type StatusPeerState,
+  type WorkflowDisplay,
+  type WorkflowDisplayOptions,
   type WorkflowSnapshot,
 } from "./display.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunOptions, type WorkflowRunResult } from "./workflow.js";
@@ -49,6 +54,16 @@ const workflowDisplayOptions = {
   showWidget: false,
 } as const;
 
+/** Detached/background-start transcript blocks freeze the tree under a dedicated header. */
+function freezeSnapshot(snapshot: WorkflowSnapshot): WorkflowSnapshot {
+  return {
+    ...snapshot,
+    phases: [...snapshot.phases],
+    logs: [...snapshot.logs],
+    agents: snapshot.agents.map((agent) => ({ ...agent })),
+  };
+}
+
 /** One in-flight synchronous run that can still be adopted into the background registry. */
 export interface SyncRunHandle {
   /** Adopt the run: register it in the registry and resolve the tool call with the detached text. Idempotent once detached/completed. */
@@ -78,6 +93,19 @@ export function createWorkflowTool(
   options: WorkflowToolOptions = {},
 ): ToolDefinition<typeof workflowToolSchema, any> & WorkflowToolExtras {
   const syncRuns = new Set<SyncRunHandle>();
+  // Recently settled background runs keep their terminal state visible in the multi-workflow
+  // aggregate status line (the registry drops entries on settle). Capped; ids sorted numerically.
+  const settledPeers = new Map<string, StatusPeerState>();
+  const onSettle: ((settlement: BackgroundSettlement) => void) | undefined = options.onSettle
+    ? (settlement) => {
+        settledPeers.set(settlement.id, settlement.cancelled ? "cancelled" : settlement.ok ? "done" : "failed");
+        if (settledPeers.size > 8) {
+          const oldest = settledPeers.keys().next().value;
+          if (oldest !== undefined) settledPeers.delete(oldest);
+        }
+        options.onSettle?.(settlement);
+      }
+    : undefined;
   const tool = defineTool({
     name: "workflow",
     label: "Workflow",
@@ -104,13 +132,50 @@ export function createWorkflowTool(
       let snapshot: WorkflowSnapshot = createWorkflowSnapshot(parsed.meta);
       snapshot.startedAt = Date.now();
       if (options.uiRef) options.uiRef.current = ctx.ui;
-      const display = createToolUpdateWorkflowDisplay(onUpdate, ctx, workflowDisplayOptions);
+      const display = createToolUpdateWorkflowDisplay(onUpdate, ctx, {
+        ...workflowDisplayOptions,
+        statusOptions: () => ({ backgroundId: statusInfo.backgroundId, peers: collectPeers() }),
+      });
+      // Widgets shown only while a run is in the background (detach / background: true).
+      const extraDisplays: WorkflowDisplay[] = [];
+      const statusInfo: { backgroundId?: string } = {};
+      const collectPeers = (): StatusPeer[] | undefined => {
+        if (!options.registry || !statusInfo.backgroundId) return undefined;
+        const peers: StatusPeer[] = options.registry
+          .list()
+          .map((entry): StatusPeer => ({ id: entry.id, state: "running" }));
+        for (const [id, state] of settledPeers) {
+          if (!peers.some((peer) => peer.id === id)) peers.push({ id, state });
+        }
+        return peers.sort((a, b) => peerNumber(b.id) - peerNumber(a.id));
+      };
+      const attachBackgroundWidget = (): void => {
+        if (!ctx.hasUI) return;
+        const widget = createWidgetWorkflowDisplay(ctx, {
+          key: workflowDisplayOptions.key,
+          placement: "belowEditor",
+          maxAgents: workflowDisplayOptions.maxAgents,
+          maxLogs: workflowDisplayOptions.maxLogs,
+          showStatus: false,
+          showWidget: true,
+        });
+        extraDisplays.push(widget);
+        widget.update(snapshot);
+      };
+      const finishAdopted = (): void => {
+        snapshot = recomputeWorkflowSnapshot(snapshot);
+        display.complete(snapshot);
+        for (const widget of extraDisplays) widget.complete(snapshot);
+        for (const widget of extraDisplays) widget.clear();
+        extraDisplays.length = 0;
+      };
 
       // In-place recompute: keep the snapshot object identity stable so the shared
       // makeCallbacks closures stay live after a detach hands the run to the background.
       const update = () => {
         Object.assign(snapshot, recomputeWorkflowSnapshot(snapshot));
         display.update(snapshot);
+        for (const widget of extraDisplays) widget.update(snapshot);
       };
 
       if (params.background === true) {
@@ -135,25 +200,25 @@ export function createWorkflowTool(
         });
         const entry = adoptRun(
           options.registry,
-          options.onSettle,
+          onSettle,
           parsed.meta.name,
           run,
           controller,
           () => signal?.removeEventListener("abort", onAbort),
-          () => {
-            snapshot = recomputeWorkflowSnapshot(snapshot);
-            display.complete(snapshot);
-          },
+          finishAdopted,
+          () => `${snapshot.doneCount}/${snapshot.agentCount}`,
         );
+        statusInfo.backgroundId = entry.id;
+        attachBackgroundWidget();
         return {
           content: [
             {
               type: "text",
-              text: `Workflow ${entry.id} (${parsed.meta.name}) started in the background. Its settlement is reported automatically and starts your next turn: if nothing else is left to do, end your turn now instead of polling. This is NOT a bash task — bash_output/bash_tasks/bash_kill will not find ${entry.id}; cancellation is workflow_cancel.`,
+              text: `工作流 ${entry.id} (${parsed.meta.name}) 已后台启动。结算会自动上报并开启你的下一回合:没有别的事就结束回合,勿轮询;/workflow 列出运行,workflow_cancel 取消。`,
             },
           ],
           details: {
-            ...createWorkflowSnapshot(parsed.meta),
+            ...freezeSnapshot(snapshot),
             background: true,
             id: entry.id,
           },
@@ -192,16 +257,16 @@ export function createWorkflowTool(
           if (!options.registry) return undefined;
           const entry = adoptRun(
             options.registry,
-            options.onSettle,
+            onSettle,
             parsed.meta.name,
             work,
             controller,
             () => signal?.removeEventListener("abort", onAbort),
-            () => {
-              snapshot = recomputeWorkflowSnapshot(snapshot);
-              display.complete(snapshot);
-            },
+            finishAdopted,
+            () => `${snapshot.doneCount}/${snapshot.agentCount}`,
           );
+          statusInfo.backgroundId = entry.id;
+          attachBackgroundWidget();
           resolveDetached(entry);
           return entry;
         },
@@ -217,13 +282,14 @@ export function createWorkflowTool(
             content: [
               {
                 type: "text",
-                text: `Workflow ${entry.id} (${parsed.meta.name}) detached to the background because you sent a message: reply to the user first; settlement is reported automatically. This is NOT a bash task — bash_output/bash_tasks/bash_kill will not find ${entry.id}; cancellation is workflow_cancel.`,
+                text: `你发来了消息,本次运行已转入后台 (${entry.id})。请先回复用户;结算会自动上报。这不是 bash 任务——bash_output/bash_tasks/bash_kill 找不到 ${entry.id};取消用 workflow_cancel。`,
               },
             ],
             details: {
-              ...createWorkflowSnapshot(parsed.meta),
+              ...freezeSnapshot(snapshot),
               background: true,
               id: entry.id,
+              detached: true,
             },
           };
         }
@@ -278,9 +344,18 @@ export function createWorkflowTool(
       return new Text(theme.fg("toolTitle", theme.bold("workflow")), 0, 0);
     },
     renderResult(result, { isPartial }, theme) {
-      const snapshot = result.details as WorkflowSnapshot | undefined;
+      const snapshot = result.details as
+        | (WorkflowSnapshot & { background?: boolean; id?: string; detached?: boolean })
+        | undefined;
       if (snapshot?.name) {
-        return new Text(renderWorkflowText(snapshot, !isPartial, workflowDisplayOptions), 0, 0);
+        let options: WorkflowDisplayOptions = workflowDisplayOptions;
+        if (!isPartial && snapshot.background && snapshot.id) {
+          options = {
+            ...options,
+            header: snapshot.detached ? `工作流已转后台 (${snapshot.id})` : `工作流已后台启动 (${snapshot.id})`,
+          };
+        }
+        return new Text(renderWorkflowText(snapshot, !isPartial, options), 0, 0);
       }
       const text = result.content?.[0];
       return new Text(text?.type === "text" ? text.text : theme.fg("muted", "workflow"), 0, 0);
@@ -335,6 +410,10 @@ function makeCallbacks(
   };
 }
 
+function peerNumber(id: string): number {
+  return Number.parseInt(id.replace("wf-", ""), 10) || 0;
+}
+
 /** Shared adoption path: register a live run in the registry and deliver its settlement via onSettle. */
 function adoptRun(
   registry: BackgroundRegistry,
@@ -344,8 +423,10 @@ function adoptRun(
   controller: AbortController,
   cleanup?: () => void,
   onDone?: () => void,
+  progress?: () => string,
 ): BackgroundWorkflow {
   const entry = registry.add(name, run, controller);
+  if (progress) entry.progress = progress;
   void run
     .then(
       (result): BackgroundSettlement => ({
@@ -413,12 +494,7 @@ export function createWorkflowCancelTool(registry: BackgroundRegistry): ToolDefi
       const running = registry.list().map((entry) => `${entry.id} (${entry.name})`);
       if (params.id === undefined) {
         return {
-          content: [
-            {
-              type: "text",
-              text: running.length ? `Running background workflows: ${running.join(", ")}` : "No background workflows.",
-            },
-          ],
+          content: [{ type: "text", text: running.length ? `后台工作流:${running.join(", ")}` : "没有后台工作流。" }],
           details: { cancelled: false, running, id: undefined } as WorkflowCancelDetails,
         };
       }
@@ -426,14 +502,12 @@ export function createWorkflowCancelTool(registry: BackgroundRegistry): ToolDefi
       if (!cancelled) {
         throw new Error(
           running.length
-            ? `Unknown workflow id ${params.id}; running: ${running.join(", ")}`
-            : `Unknown workflow id ${params.id}; no background workflows are running`,
+            ? `未知的工作流 id: ${params.id}(在跑:${running.join(", ")})`
+            : `未知的工作流 id: ${params.id}`,
         );
       }
       return {
-        content: [
-          { type: "text", text: `Workflow ${params.id} cancel requested; its settlement is reported automatically.` },
-        ],
+        content: [{ type: "text", text: "已请求取消;结算会自动上报。" }],
         details: { cancelled: true, running: [], id: params.id } as WorkflowCancelDetails,
       };
     },

@@ -45,6 +45,24 @@ export interface WorkflowDisplayOptions {
   /** Default true; false keeps the footer status line but skips setWidget. */
   showWidget?: boolean;
   showResultPreviews?: boolean;
+  /** Overrides the default 工作流运行中/工作流已完成 transcript header (e.g. detached/background start). */
+  header?: string;
+  /** Per-render status-line context (background id, peer runs); called lazily so detached state shows up. */
+  statusOptions?: () => WorkflowStatusOptions;
+}
+
+export type StatusPeerState = "running" | "done" | "failed" | "cancelled";
+
+export interface StatusPeer {
+  id: string;
+  state: StatusPeerState;
+}
+
+export interface WorkflowStatusOptions {
+  /** Set once this run lives in the background registry; switches the status line to the ⏵ wf-N form. */
+  backgroundId?: string;
+  /** All session background runs (live + recently settled); >1 collapses into the aggregate line. */
+  peers?: StatusPeer[];
 }
 
 export function createWorkflowSnapshot(meta: WorkflowMeta): WorkflowSnapshot {
@@ -79,7 +97,7 @@ export function createWidgetWorkflowDisplay(
 
   const render = (snapshot: WorkflowSnapshot, completed = false) => {
     if (!ctx.hasUI) return;
-    if (showStatus) ctx.ui.setStatus(key, statusLine(snapshot, completed));
+    if (showStatus) ctx.ui.setStatus(key, renderStatusLine(snapshot, completed, options.statusOptions?.() ?? {}));
     if (showWidget) ctx.ui.setWidget(key, renderWorkflowLines(snapshot, options), { placement });
   };
 
@@ -136,15 +154,15 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
   const showResultPreviews = options.showResultPreviews ?? false;
   const state =
     snapshot.errorCount > 0
-      ? `, ${snapshot.errorCount} errors`
+      ? `, ${snapshot.errorCount} 错误`
       : snapshot.runningCount > 0
-        ? `, ${snapshot.runningCount} running`
+        ? `, ${snapshot.runningCount} 运行中`
         : "";
   const elapsed =
     snapshot.startedAt !== undefined && snapshot.durationMs === undefined
       ? ` · ${Math.max(0, Math.round((Date.now() - snapshot.startedAt) / 1000))}s`
       : "";
-  const lines = [`◆ Workflow: ${snapshot.name} (${snapshot.doneCount}/${snapshot.agentCount} done${state})${elapsed}`];
+  const lines = [`◆ 工作流: ${snapshot.name} (${snapshot.doneCount}/${snapshot.agentCount} 完成${state})${elapsed}`];
 
   const agentPhaseNames = snapshot.agents
     .map((agent) => agent.phase)
@@ -167,7 +185,7 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
     const complete = agents.length > 0 && done + errors + skipped === agents.length;
     const marker = running > 0 || (!complete && snapshot.currentPhase === phase) ? "▶" : complete ? "✓" : " ";
     lines.push(
-      `  ${marker} ${phase} ${done}/${agents.length}${running ? ` · ${running} running` : ""}${errors ? ` · ${errors} errors` : ""}${skipped ? ` · ${skipped} skipped` : ""}`,
+      `  ${marker} ${phase} ${done}/${agents.length}${running ? ` · ${running} 运行中` : ""}${errors ? ` · ${errors} 错误` : ""}${skipped ? ` · ${skipped} 跳过` : ""}`,
     );
 
     const visibleAgents = agents.slice(-maxAgents);
@@ -176,13 +194,12 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
       lines.push(`    ${order} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${result}`);
     }
-    if (agents.length > visibleAgents.length)
-      lines.push(`    … ${agents.length - visibleAgents.length} earlier agents`);
+    if (agents.length > visibleAgents.length) lines.push(`    … ${agents.length - visibleAgents.length} 更早的子代理`);
   }
 
   const unphased = snapshot.agents.filter((agent) => !rendered.has(agent));
   if (unphased.length) {
-    lines.push("  Unphased");
+    lines.push("  未分组");
     for (const agent of unphased.slice(-maxAgents)) {
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
       lines.push(`    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${result}`);
@@ -192,7 +209,7 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
   const visibleLogs = snapshot.logs.slice(-maxLogs);
   if (visibleLogs.length) {
     if (lines.length > 1) lines.push("");
-    for (const log of visibleLogs) lines.push(`  log: ${log}`);
+    for (const log of visibleLogs) lines.push(`  日志: ${log}`);
   }
   return lines;
 }
@@ -202,15 +219,40 @@ export function renderWorkflowText(
   completed = false,
   options: WorkflowDisplayOptions = {},
 ): string {
-  const header = completed ? "Workflow completed" : "Workflow running";
+  const header = options.header ?? (completed ? "工作流已完成" : "工作流运行中");
   return [header, ...renderWorkflowLines(snapshot, options)].join("\n");
 }
 
-function statusLine(snapshot: WorkflowSnapshot, completed: boolean): string {
-  if (completed) return `workflow ✓ ${snapshot.name}: ${snapshot.doneCount}/${snapshot.agentCount}`;
-  if (snapshot.runningCount > 0)
-    return `workflow ${snapshot.name}: ${snapshot.runningCount} running, ${snapshot.doneCount}/${snapshot.agentCount} done`;
-  return `workflow ${snapshot.name}: ${snapshot.doneCount}/${snapshot.agentCount} done`;
+/** Pure footer status line: foreground running, background running, terminal and multi-workflow aggregate forms. */
+export function renderStatusLine(
+  snapshot: WorkflowSnapshot,
+  completed: boolean,
+  status: WorkflowStatusOptions = {},
+): string {
+  if (completed) {
+    if (snapshot.errorCount > 0)
+      return `workflow ✗ ${snapshot.name} ${snapshot.doneCount}/${snapshot.agentCount} · ${snapshot.errorCount} 错误`;
+    const seconds =
+      snapshot.durationMs !== undefined ? ` · ${Math.max(0, Math.round(snapshot.durationMs / 1000))}s` : "";
+    return `workflow ✓ ${snapshot.name} ${snapshot.doneCount}/${snapshot.agentCount}${seconds}`;
+  }
+  const peers = status.peers ?? [];
+  if (status.backgroundId && peers.length > 1) {
+    const marks: Record<StatusPeerState, string> = { running: "⏵", done: "✓", failed: "✗", cancelled: "⊘" };
+    const sorted = [...peers].sort((a, b) => peerId(b.id) - peerId(a.id));
+    const shown = sorted.slice(0, 2).map((peer) => `${peer.id} ${marks[peer.state]}`);
+    const rest = sorted.length - shown.length;
+    return `workflow: ${peers.length} 后台 · ${shown.join(" · ")}${rest > 0 ? ` · …+${rest}` : ""}`;
+  }
+  const elapsed =
+    snapshot.startedAt !== undefined ? ` · ${Math.max(0, Math.round((Date.now() - snapshot.startedAt) / 1000))}s` : "";
+  if (status.backgroundId)
+    return `workflow ${snapshot.name} ⏵ ${status.backgroundId} · ${snapshot.doneCount}/${snapshot.agentCount} 完成${elapsed}`;
+  return `workflow ${snapshot.name} ● ${snapshot.runningCount} 运行中, ${snapshot.doneCount}/${snapshot.agentCount} 完成${elapsed}`;
+}
+
+function peerId(id: string): number {
+  return Number.parseInt(id.replace("wf-", ""), 10) || 0;
 }
 
 function statusIcon(status: WorkflowAgentStatus): string {

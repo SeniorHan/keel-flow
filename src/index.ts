@@ -3,11 +3,14 @@ export { WorkflowAgent } from "./agent.js";
 export type { BackgroundSettlement, BackgroundWorkflow } from "./background.js";
 export { BackgroundRegistry, settlementNotifyLine, settlementText } from "./background.js";
 export type {
+  StatusPeer,
+  StatusPeerState,
   WorkflowAgentSnapshot,
   WorkflowAgentStatus,
   WorkflowDisplay,
   WorkflowDisplayOptions,
   WorkflowSnapshot,
+  WorkflowStatusOptions,
 } from "./display.js";
 export {
   createToolUpdateWorkflowDisplay,
@@ -15,6 +18,7 @@ export {
   createWorkflowSnapshot,
   preview,
   recomputeWorkflowSnapshot,
+  renderStatusLine,
   renderWorkflowLines,
   renderWorkflowText,
 } from "./display.js";

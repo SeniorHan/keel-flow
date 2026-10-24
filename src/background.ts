@@ -6,6 +6,8 @@ export interface BackgroundWorkflow {
   startedAt: number;
   controller: AbortController;
   run: Promise<WorkflowRunResult>;
+  /** Live done/total agent counts, wired up by the tool; drives the /workflow list line. */
+  progress?: () => string;
 }
 
 export interface BackgroundSettlement {
@@ -25,21 +27,26 @@ export function truncateResultText(json: string): string {
   return json.length > RESULT_TEXT_CAP ? `${json.slice(0, RESULT_TEXT_CAP)}\n…(truncated)` : json;
 }
 
+const NOTIFY_ERROR_CAP = 80;
+
 export function settlementText(n: BackgroundSettlement): string {
   const seconds = (n.durationMs / 1000).toFixed(1);
-  if (n.cancelled) return `Background workflow ${n.id} (${n.name}) was cancelled after ${seconds} s.`;
-  if (!n.ok) return `Background workflow ${n.id} (${n.name}) failed after ${seconds} s: ${n.error ?? "unknown error"}`;
+  if (n.cancelled) return `后台工作流 ${n.id} (${n.name}) 已在 ${seconds} s 后取消。`;
+  if (!n.ok) return `后台工作流 ${n.id} (${n.name}) 在 ${seconds} s 后失败:${n.error ?? "未知错误"}`;
   const json = truncateResultText(JSON.stringify(n.result ?? null, null, 2));
-  return `Background workflow ${n.id} (${n.name}) completed with ${n.agentCount} agent(s) in ${seconds} s.\n\nResult:\n${json}`;
+  return `后台工作流 ${n.id} (${n.name}) 已完成:${n.agentCount} 个子代理,耗时 ${seconds} s。\n\n结果:\n${json}`;
 }
 
 /** One-line settlement notification for the TUI (pi notify). */
 export function settlementNotifyLine(n: BackgroundSettlement): string {
   const seconds = (n.durationMs / 1000).toFixed(1);
-  if (n.cancelled) return `${n.id} (${n.name}) ⊘ cancelled after ${seconds}s`;
-  if (!n.ok) return `${n.id} (${n.name}) ✗ failed: ${n.error ?? "unknown error"}`;
-  const agents = `${n.agentCount} agent${n.agentCount === 1 ? "" : "s"}`;
-  return `${n.id} (${n.name}) ✓ completed · ${agents} · ${seconds}s`;
+  if (n.cancelled) return `${n.id} (${n.name}) ⊘ 已取消 · ${seconds}s 后`;
+  if (!n.ok) {
+    const message = n.error ?? "未知错误";
+    const error = message.length > NOTIFY_ERROR_CAP ? `${message.slice(0, NOTIFY_ERROR_CAP - 1)}…` : message;
+    return `${n.id} (${n.name}) ✗ 失败: ${error}`;
+  }
+  return `${n.id} (${n.name}) ✓ 完成 · ${n.agentCount} 个子代理 · ${seconds}s`;
 }
 
 /**

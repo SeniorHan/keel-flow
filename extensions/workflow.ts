@@ -37,25 +37,25 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       const cancelMatch = args.match(/^cancel\s+(wf-\d+)$/);
       if (cancelMatch) {
         if (registry.cancel(cancelMatch[1])) {
-          ctx.ui.notify(`${cancelMatch[1]} cancel requested; settlement is reported automatically`);
+          ctx.ui.notify("已请求取消;结算会自动上报。");
         } else {
-          ctx.ui.notify(`Unknown workflow id ${cancelMatch[1]}; no background workflow is running`, "warning");
+          ctx.ui.notify(`未知的工作流 id: ${cancelMatch[1]}`, "warning");
         }
         return;
       }
       if (args.trim()) {
-        ctx.ui.notify("Usage: /workflow (list running) · /workflow cancel wf-N (request cancel)", "warning");
+        ctx.ui.notify("用法:/workflow 列出运行 · /workflow cancel wf-N 请求取消", "warning");
         return;
       }
       const running = registry.list();
       if (running.length === 0) {
-        ctx.ui.notify("No background workflows.");
+        ctx.ui.notify("没有后台工作流。");
         return;
       }
-      const lines = running.map(
-        (entry) =>
-          `${entry.id} (${entry.name}) · ${Math.max(0, Math.round((Date.now() - entry.startedAt) / 1000))}s elapsed`,
-      );
+      const lines = running.map((entry) => {
+        const elapsed = Math.max(0, Math.round((Date.now() - entry.startedAt) / 1000));
+        return `${entry.id}  ${entry.name}  ⏵ 运行中  ${entry.progress?.() ?? "…"} · ${elapsed}s`;
+      });
       ctx.ui.notify(lines.join("\n"));
     },
   });
@@ -71,7 +71,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       pi.sendMessage(
         {
           customType: "keel-flow:update",
-          content: `Workflow ${entry.id} (${entry.name}) detached to the background because you sent a message: reply to the user first; settlement is reported automatically. This is NOT a bash task — bash_output/bash_tasks/bash_kill will not find ${entry.id}; cancellation is workflow_cancel.`,
+          content: `你发来了消息,本次运行已转入后台 (${entry.id})。请先回复用户;结算会自动上报。这不是 bash 任务——bash_output/bash_tasks/bash_kill 找不到 ${entry.id};取消用 workflow_cancel。`,
           display: false,
           details: { backgroundId: entry.id, detached: true },
         },

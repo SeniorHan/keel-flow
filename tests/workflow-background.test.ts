@@ -51,8 +51,9 @@ test("background: true returns immediately with a wf id; completion delivers set
 
   const started = await runTool(tool, { script: BG_SCRIPT, background: true });
   const text = started.content[0]?.text ?? "";
-  assert.match(text, /started in the background/);
-  assert.match(text, /NOT a bash task/);
+  assert.match(text, /已后台启动/);
+  assert.match(text, /结束回合,勿轮询/);
+  assert.match(text, /workflow_cancel/);
   const id = (started.details as { id?: string }).id ?? "";
   assert.match(id, /^wf-\d+$/);
   assert.equal(registry.list().length, 1);
@@ -91,7 +92,7 @@ test("workflow_cancel tool: lists, cancels, rejects unknown ids", async () => {
   const cancelTool = createWorkflowCancelTool(registry);
 
   const empty = await runTool(cancelTool, {});
-  assert.match(empty.content[0]?.text ?? "", /No background workflows/);
+  assert.match(empty.content[0]?.text ?? "", /没有后台工作流/);
 
   const agent = blockingAgent();
   const workflowTool = createWorkflowTool({ agent, registry, onSettle: () => {} });
@@ -102,10 +103,10 @@ test("workflow_cancel tool: lists, cancels, rejects unknown ids", async () => {
   assert.match(listed.content[0]?.text ?? "", new RegExp(id));
 
   const cancelled = await runTool(cancelTool, { id });
-  assert.match(cancelled.content[0]?.text ?? "", /cancel requested/);
+  assert.match(cancelled.content[0]?.text ?? "", /已请求取消/);
 
   agent.release();
-  await assert.rejects(runTool(cancelTool, { id: "wf-999" }), /Unknown workflow id/);
+  await assert.rejects(runTool(cancelTool, { id: "wf-999" }), /未知的工作流 id/);
 });
 
 test("detach detaches an in-flight sync run: tool resolves detached, settlement still arrives", async () => {
@@ -124,10 +125,13 @@ test("detach detaches an in-flight sync run: tool resolves detached, settlement 
 
   const result = await pending;
   const text = result.content[0]?.text ?? "";
-  assert.match(text, /detached to the background because you sent a message/);
-  assert.match(text, /NOT a bash task/);
-  assert.match(text, /cancellation is workflow_cancel/);
-  assert.equal((result.details as { id?: string }).id, entry.id);
+  assert.match(text, /已转入后台 \(wf-\d+\)/);
+  assert.match(text, /bash 任务/);
+  assert.match(text, /取消用 workflow_cancel/);
+  const details = result.details as { id?: string; detached?: boolean; agents?: unknown[] };
+  assert.equal(details.id, entry.id);
+  assert.equal(details.detached, true);
+  assert.equal(details.agents?.length, 1, "detach freezes the mid-run tree into the transcript block");
 
   agent.release();
   for (let i = 0; i < 4; i += 1) await new Promise((r) => setImmediate(r));
@@ -170,7 +174,7 @@ test("workflow tool description advertises background and sync default", () => {
 test("settlementNotifyLine covers completed, failed and cancelled branches", () => {
   assert.equal(
     settlementNotifyLine({ id: "wf-1", name: "fan_out", ok: true, cancelled: false, durationMs: 1234, agentCount: 3 }),
-    "wf-1 (fan_out) ✓ completed · 3 agents · 1.2s",
+    "wf-1 (fan_out) ✓ 完成 · 3 个子代理 · 1.2s",
   );
   assert.equal(
     settlementNotifyLine({
@@ -182,12 +186,27 @@ test("settlementNotifyLine covers completed, failed and cancelled branches", () 
       agentCount: 0,
       error: "boom",
     }),
-    "wf-2 (probe) ✗ failed: boom",
+    "wf-2 (probe) ✗ 失败: boom",
   );
   assert.equal(
     settlementNotifyLine({ id: "wf-3", name: "probe", ok: false, cancelled: true, durationMs: 2500, agentCount: 0 }),
-    "wf-3 (probe) ⊘ cancelled after 2.5s",
+    "wf-3 (probe) ⊘ 已取消 · 2.5s 后",
   );
+});
+
+test("settlementNotifyLine truncates long errors to 80 characters", () => {
+  const long = "x".repeat(200);
+  const line = settlementNotifyLine({
+    id: "wf-9",
+    name: "probe",
+    ok: false,
+    cancelled: false,
+    durationMs: 100,
+    agentCount: 0,
+    error: long,
+  });
+  assert.equal(line, `wf-9 (probe) ✗ 失败: ${`${"x".repeat(79)}…`}`);
+  assert.ok(line.length < 100);
 });
 
 test("background runs stream progress via onUpdate and notify the TUI on settle", async () => {
@@ -232,7 +251,7 @@ test("background runs stream progress via onUpdate and notify the TUI on settle"
     "agent completion is streamed",
   );
   assert.ok(
-    texts.some((t) => t.startsWith("Workflow completed")),
+    texts.some((t) => t.startsWith("工作流已完成")),
     "settle marks the background display complete",
   );
   assert.equal(settlements.length, 1);
@@ -262,7 +281,7 @@ test("settle after detach runs display.complete: onUpdate gets a completed rende
   agent.release();
   for (let i = 0; i < 4; i += 1) await new Promise((r) => setImmediate(r));
   assert.ok(
-    texts.some((t) => t.startsWith("Workflow completed")),
+    texts.some((t) => t.startsWith("工作流已完成")),
     "detached settle marks the display complete",
   );
 });

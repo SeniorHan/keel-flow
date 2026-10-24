@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.6.0] — 中文标签全套: transcript blocks, status line, background widget, notify, /workflow (2026-10-24)
+
+### Changed
+
+- 全套中文标签。Transcript blocks: running header `工作流运行中` / completed `工作流已完成`; detached runs freeze their block under `工作流已转后台 (wf-N)` and background: true starts under `工作流已后台启动 (wf-N)` (new `header` option in `WorkflowDisplayOptions`, driven by `details.detached`); detach/background body copy is Chinese. The `◆ 工作流:` tree, phase rows (`N 运行中`/`N 错误`/`N 跳过`), `… N 更早的子代理` and `日志:` lines are Chinese; agent icons unchanged.
+- Status line rewritten as the exported pure `renderStatusLine(snapshot, completed, { backgroundId?, peers? })`: foreground `workflow <名> ● N 运行中, D/T 完成 · Ns`, background `workflow <名> ⏵ wf-N · D/T 完成 · Ns`, terminal `workflow ✓ <名> D/T · Ns` / `workflow ✗ <名> D/T · N 错误`; with >1 background runs it collapses into `workflow: N 后台 · wf-2 ⏵ · wf-1 ✓` (fold `…+1`; peers combine the live registry with recently settled runs).
+- Background runs now attach a live widget (belowEditor) at detach / background start and clear it after the terminal render on settle; foreground runs keep `showWidget: false`.
+- Settlement notify is Chinese with 80-char error truncation: `wf-2 (名) ✓ 完成 · 4 个子代理 · 76.3s` / `✗ 失败: …` / `⊘ 已取消 · 12.0s 后`; `settlementText` likewise.
+- `/workflow` and the `workflow_cancel` tool answer in Chinese; the list line shows live progress: `wf-2  tui_showcase  ⏵ 运行中  1/4 · 47s` (new optional `BackgroundWorkflow.progress` getter wired from the tool snapshot).
+
 ## [1.5.0] — TUI wiring: running status line, settlement finish + notify, /workflow command (2026-10-24)
 
 ### Added
