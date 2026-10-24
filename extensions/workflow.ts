@@ -8,6 +8,7 @@ import {
 import { renderWorkflowView } from "../src/display.js";
 import { exportRunHtml } from "../src/export-html.js";
 import { createWorkflowCancelTool, createWorkflowTool, type WorkflowToolExtras } from "../src/index.js";
+import { openWorkflowDialog } from "../src/workflow-dialog.js";
 
 const VIEW_WIDGET_KEY = "workflow-view";
 /** 围观 widget auto-refresh cadence; Esc can't be intercepted in widget mode, so this keeps it live. */
@@ -62,6 +63,21 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   };
 
   const history = new Map<string, import("../src/display.js").WorkflowSnapshot>();
+  // Export logic shared by the /workflow export subcommand and the dialog deps
+  // (the dialog itself binds no export key — it only points at the command).
+  const exportRun = async (exportCtx: Pick<ExtensionContext, "ui">, id: string): Promise<void> => {
+    const snapshot = history.get(id);
+    if (!snapshot) {
+      exportCtx.ui.notify(`${id} 无已结算快照(未知 id、尚未结束或已被清出历史)。`, "warning");
+      return;
+    }
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const path = join(tmpdir(), `keel-flow-${id}.html`);
+    writeFileSync(path, exportRunHtml(snapshot, { id }));
+    exportCtx.ui.notify(`已导出: ${path}`);
+  };
   const tool = createWorkflowTool({ registry, onSettle, uiRef, history });
   pi.registerTool(tool);
   pi.registerTool(createWorkflowCancelTool(registry));
@@ -102,17 +118,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       }
       const exportMatch = args.match(/^export\s+(wf-\d+)$/);
       if (exportMatch) {
-        const snapshot = history.get(exportMatch[1]);
-        if (!snapshot) {
-          ctx.ui.notify(`${exportMatch[1]} 无已结算快照(未知 id、尚未结束或已被清出历史)。`, "warning");
-          return;
-        }
-        const { writeFileSync } = await import("node:fs");
-        const { join } = await import("node:path");
-        const { tmpdir } = await import("node:os");
-        const path = join(tmpdir(), `keel-flow-${exportMatch[1]}.html`);
-        writeFileSync(path, exportRunHtml(snapshot, { id: exportMatch[1] }));
-        ctx.ui.notify(`已导出: ${path}`);
+        await exportRun(ctx, exportMatch[1]);
         return;
       }
       if (args.trim()) {
@@ -120,6 +126,11 @@ export default function workflowExtension(pi: ExtensionAPI): void {
           "用法:/workflow 列出运行 · /workflow view [wf-N] 围观 · /workflow cancel wf-N 取消 · /workflow export wf-N 导出报告",
           "warning",
         );
+        return;
+      }
+      // 交互 TUI:crew 式两层对话框(列表 → 围观详情);headless 走下面的 notify 列表。
+      if (ctx.hasUI && typeof ctx.ui.custom === "function") {
+        await openWorkflowDialog(ctx, { registry, history, exportRun: (id) => exportRun(ctx, id) });
         return;
       }
       const running = registry.list();

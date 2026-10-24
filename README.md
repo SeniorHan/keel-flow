@@ -45,6 +45,15 @@ The model will write a workflow script and call the `workflow` tool. Live progre
 
 Press `Esc` to cancel a running workflow. Active subagents are aborted and surfaced as skipped.
 
+### Monitoring background runs: the `/workflow` dialog
+
+Run a workflow with `background: true` (or send a message while a sync run is in flight to detach it), then run `/workflow` with no arguments in the interactive TUI. A two-layer dialog opens:
+
+- **List layer** — one row per background run (`⏵ wf-N (name) · elapsed`) followed by recently settled runs (`✓/✗ wf-N (name) · total time`, newest first). `↑`/`↓` or `j`/`k` to move, `Enter` to inspect, `Esc` or `q` to close. With no runs it shows 「没有后台工作流」 and can still be closed.
+- **Detail layer** — the full inspection view (structure tree, hang warnings, live log stream), re-rendered every second while the run is active. `Esc` returns to the list without closing the dialog. Settled runs show their final snapshot and a hint pointing at `/workflow export wf-N` for an HTML report.
+
+In headless modes `/workflow` still answers with a plain notification list, and the `view` / `cancel` / `export` subcommands work everywhere as before.
+
 ## Workflow script shape
 
 A workflow is plain JavaScript. The first statement must export literal metadata. `name` and `description` are required; `phases` is optional documentation for an expected outline. The live progress view is driven by `phase(...)` calls at runtime:

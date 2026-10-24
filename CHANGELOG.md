@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0] — crew 式两层对话框导航 (2026-10-24)
+
+### Added
+
+- **`/workflow` 交互对话框**:无参调用在交互 TUI 下打开 crew 式覆盖层(`ctx.ui.custom`),两层导航——列表层按 `⏵ 运行中(registry)+ ✓/✗ 已结算(结算历史倒序)` 列行,`↑↓`/`j/k` 选择,`Enter` 进详情,`Esc`/`q` 关闭;详情层复用 `renderWorkflowView`(结构树+挂死预警+日志流),运行中每 1s 重渲染,`Esc` 只回列表不退出;已结算行显示终态快照并提示 `/workflow export wf-N`。空列表显示「没有后台工作流」仍可关闭。headless(print/RPC)保持原有 notify 列表;`view`/`cancel`/`export` 子命令全部保留。
+- `src/workflow-dialog.ts`:纯函数 `handleKey(state,key)`/`renderDialogLines(items,selected)` 可单测;`openWorkflowDialog(ctx, {registry, history, exportRun})` 为胶水入口(exportRun 由 `/workflow export` 子命令共用,详情层不绑导出快捷键)。
+
 ## [1.7.1] — HTML 运行报告导出 (2026-10-24)
 
 ### Added
